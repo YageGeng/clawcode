@@ -1,14 +1,15 @@
-import { effect, keymap, LayoutAnimation, reduceMotion, signal, View } from "nsh";
+import { computed, effect, keymap, signal, View } from "nsh";
 import type { JSX } from "nsh/jsx-runtime";
 import { t } from "nsh/i18n";
 
 import type { SessionId } from "../client/acp/protocol";
+import { messageOf } from "../client/errors";
 import type { HostStore } from "../stores/host";
 import { IconButton } from "../ui/button";
 import { Textarea } from "../ui/input";
 import { Tooltip } from "../ui/menu";
 import { Appear } from "../ui/appear";
-import { motion } from "../ui/motion";
+import { glideNextLayout } from "../ui/motion";
 import { Surface } from "../ui/surface";
 import { PermissionCard } from "./PermissionCard";
 
@@ -28,9 +29,10 @@ export function Composer(props: {
   context?: JSX.Element;
 }) {
   const draft = signal("");
-  const running = () => props.sessionId !== null && props.host.workspace().sessionWorkspaces.get(props.sessionId)?.running === true;
+  const running = () => props.sessionId !== null && props.host.running(props.sessionId);
   const canSend = () => props.disabled !== true && !running() && draft().trim() !== "";
-  const pending = () => props.host.workspace().permissions.find((prompt) => prompt.sessionId === props.sessionId);
+  // A value of its own: the Escape binding below follows it, and must not be bound again on every streamed token.
+  const pending = computed(() => (props.sessionId === null ? undefined : props.host.permissionFor(props.sessionId)));
   // The round button grows in only when it swaps (send ↔ stop), not when the composer first shows.
   let swapped = false;
   setTimeout(() => (swapped = true), 0);
@@ -49,14 +51,14 @@ export function Composer(props: {
     const text = draft();
     draft.set("");
     props.onSend(text).catch((error: unknown) => {
-      console.warn(`send: ${error instanceof Error ? error.message : String(error)}`);
+      console.warn(`send: ${messageOf(error)}`);
       if (draft() === "") draft.set(text);
     });
   };
 
   /** Answers the pending approval; its card fades while the composer settles. */
   const answer = (key: string, optionId: string | undefined) => {
-    if (!reduceMotion()) LayoutAnimation.configureNext(LayoutAnimation.create(motion.base, "easeInEaseOut", "opacity"));
+    glideNextLayout();
     props.host.answerPermission(key, optionId);
   };
 

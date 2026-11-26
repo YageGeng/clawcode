@@ -29,7 +29,7 @@ export function PermissionCard(props: { prompt: PermissionPrompt; onAnswer: (opt
           </If>
         </View>
         <View class="flex-row flex-wrap justify-end gap-2">
-          <Each of={[...props.prompt.options]} key={(option) => option.optionId}>
+          <Each of={props.prompt.options} key={(option) => option.optionId}>
             {(option) => (
               <Button label={option().name} variant={optionVariant(option(), lead())} onPress={() => props.onAnswer(option().optionId)} />
             )}

@@ -17,7 +17,7 @@ export function HostSwitcher(props: { store: AppStore; size?: "sm" | "md" }) {
       title={t("shell.hosts")}
       trigger={<Button variant="ghost" size={props.size ?? "md"} icon="laptop" label={hostName(props.store.currentHost().info)} />}
     >
-      <Each of={[...props.store.hosts()]} key={(host) => host.info.id}>
+      <Each of={props.store.hosts()} key={(host) => host.info.id}>
         {(host) => (
           <MenuItem
             label={hostName(host().info)}

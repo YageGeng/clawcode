@@ -1,5 +1,6 @@
 import { Backend } from "clawcode-backend";
 
+import { messageOf } from "../client/errors";
 import type { AcpTransport } from "../client/transport";
 
 /** How long the app's quit waits for the backend to stop, as the gpui client did. */
@@ -28,7 +29,7 @@ export class NativeTransport implements AcpTransport {
       for (const listener of this.frameListeners) listener(frame);
     }).then(
       (reason) => this.ended(reason ?? undefined),
-      (error: unknown) => this.ended(error instanceof Error ? error.message : String(error)),
+      (error: unknown) => this.ended(messageOf(error)),
     );
   }
 

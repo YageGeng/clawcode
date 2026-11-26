@@ -1,3 +1,5 @@
+import type { PermissionPrompt, SessionSummary } from "../domain/model";
+
 export type Brand<T, Name extends string> = T & { readonly __brand: Name };
 
 export type SessionId = Brand<string, "SessionId">;
@@ -6,8 +8,6 @@ export type EventSequence = Brand<number, "EventSequence">;
 export type TurnId = Brand<string, "TurnId">;
 export type MessageId = Brand<string, "MessageId">;
 export type ToolCallId = Brand<string, "ToolCallId">;
-export type QueueId = Brand<string, "QueueId">;
-export type EntryId = Brand<string, "EntryId">;
 export type TimestampMs = Brand<string, "TimestampMs">;
 
 export type JsonRpcError = Readonly<{
@@ -30,35 +30,10 @@ export type EventMeta = Readonly<{
 
 export type AcpMeta = Readonly<Record<string, unknown>>;
 
-export type InitializeResult = Readonly<{
-  protocolVersion: number;
-  info: Readonly<{ name: string; title?: string; version: string }>;
-  capabilities: Readonly<Record<string, unknown> & {
-    session?: Readonly<Record<string, unknown> & {
-      delete?: Readonly<Record<string, unknown>> | null;
-      prompt?: Readonly<Record<string, unknown> & { image?: Readonly<Record<string, unknown>> | null }> | null;
-    }> | null;
-  }>;
-  _meta?: AcpMeta;
-}>;
-
 export type SessionRecoveryCursor = Readonly<{
   sessionId: SessionId;
   runId: RunId;
   nextSequence: EventSequence;
-}>;
-
-export type SessionRecoveryPlan = Readonly<{
-  sessionId: SessionId;
-  mode: "watch" | "resume";
-  runId?: RunId;
-  nextSequence?: EventSequence;
-  running?: boolean;
-}>;
-
-export type InitializeRecovery = Readonly<{
-  version: 1;
-  sessions: readonly SessionRecoveryPlan[];
 }>;
 
 export type ProjectionGroupMeta = Readonly<{
@@ -67,20 +42,6 @@ export type ProjectionGroupMeta = Readonly<{
   projectionCount: number;
   lastSequence?: EventSequence;
   operationPhase?: "start" | "end";
-}>;
-
-export type ResumeRecoveryMeta = Readonly<{
-  mode: "watch" | "resume";
-  runId?: RunId;
-  journalTailSequence?: EventSequence;
-  running: boolean;
-}>;
-
-export type CursorUnavailableData = Readonly<{
-  code: "_clawcode/session_recovery_cursor_unavailable";
-  sessionId: SessionId;
-  runId: RunId;
-  sequence: EventSequence;
 }>;
 
 export type SessionInfo = Readonly<{
@@ -98,29 +59,6 @@ export type SessionListResult = Readonly<{
 
 export type NewSessionResult = Readonly<{ sessionId: SessionId }>;
 
-export type TextContentBlock = Readonly<{ type: "text"; text: string }>;
-export type ImageMimeType = "image/png" | "image/jpeg" | "image/gif" | "image/webp";
-export type ImageContentBlock = Readonly<{
-  type: "image";
-  data: string;
-  mimeType: ImageMimeType;
-}>;
-export type ResourceLinkContentBlock = Readonly<{
-  type: "resource_link";
-  name: string;
-  uri: string;
-}>;
-export type PromptContentBlock = TextContentBlock | ImageContentBlock | ResourceLinkContentBlock;
-
-/** One select-type Session config option; other option types are ignored. */
-export type ConfigSelect = Readonly<{
-  configId: string;
-  name: string;
-  category?: string;
-  currentValue: string;
-  options: readonly Readonly<{ value: string; name: string; description?: string }>[];
-}>;
-
 export type SessionUpdateNotification = Readonly<{
   sessionId: SessionId;
   update: Readonly<Record<string, unknown>>;
@@ -130,47 +68,27 @@ export type SessionUpdateNotification = Readonly<{
 export const AcpProtocol = {
   methods: {
     initialize: "initialize",
-    authLogin: "auth/login",
     sessionRequestPermission: "session/request_permission",
     sessionNew: "session/new",
     sessionList: "session/list",
     sessionResume: "session/resume",
-    sessionClose: "session/close",
-    sessionDelete: "session/delete",
     sessionPrompt: "session/prompt",
     sessionCancel: "session/cancel",
-    sessionSetConfigOption: "session/set_config_option",
-    sessionSetTitle: "session/set_title",
     sessionUpdate: "session/update"
   },
-  /** Keeps select options, flattening grouped choices; malformed entries are dropped. */
-  configOptions(value: unknown): readonly ConfigSelect[] | undefined {
-    if (!Array.isArray(value)) return undefined;
-    const record = (item: unknown): item is Record<string, unknown> => typeof item === "object" && item !== null && !Array.isArray(item);
-    return value.flatMap((item): ConfigSelect[] => {
-      if (!record(item) || item.type !== "select" || typeof item.configId !== "string" || typeof item.name !== "string" || typeof item.currentValue !== "string" || !Array.isArray(item.options)) return [];
-      const entries: unknown[] = item.options.flatMap((entry: unknown): unknown[] => record(entry) && Array.isArray(entry.options) ? entry.options : [entry]);
-      const options = entries.flatMap((entry) => record(entry) && typeof entry.value === "string" && typeof entry.name === "string"
-        ? [{ value: entry.value, name: entry.name, ...(typeof entry.description === "string" ? { description: entry.description } : {}) }]
-        : []);
-      return [{ configId: item.configId, name: item.name, ...(typeof item.category === "string" ? { category: item.category } : {}), currentValue: item.currentValue, options }];
-    });
+  /** `value` as a plain JSON object, or `undefined` for anything else (arrays and null included). */
+  record(value: unknown): Record<string, unknown> | undefined {
+    return typeof value === "object" && value !== null && !Array.isArray(value) ? value as Record<string, unknown> : undefined;
   },
+  /** `value` as a plain JSON object; throws naming `label` otherwise. */
   decodeRecord(value: unknown, label: string): Record<string, unknown> {
-    if (typeof value !== "object" || value === null || Array.isArray(value)) {
-      throw new Error(`${label} must be an object`);
-    }
-    return value as Record<string, unknown>;
+    const record = this.record(value);
+    if (record === undefined) throw new Error(`${label} must be an object`);
+    return record;
   },
   /** Returns only the configured product namespace from ACP `_meta`. */
   productMeta(meta: unknown, namespace: string): Record<string, unknown> | undefined {
-    if (typeof meta !== "object" || meta === null || Array.isArray(meta)) {
-      return undefined;
-    }
-    const namespaced = (meta as Record<string, unknown>)[namespace];
-    return typeof namespaced === "object" && namespaced !== null && !Array.isArray(namespaced)
-      ? namespaced as Record<string, unknown>
-      : undefined;
+    return this.record(this.record(meta)?.[namespace]);
   },
   /**
    * Expands one negotiated batch carrier into its ordered Session updates.
@@ -190,12 +108,10 @@ export const AcpProtocol = {
       throw new Error("ACP session update batch is invalid");
     }
     const nested = items.map((item: unknown) => {
-      if (typeof item !== "object" || item === null || Array.isArray(item)) {
-        throw new Error("ACP session update batch is invalid");
-      }
-      const record = item as Record<string, unknown>;
+      const record = this.record(item);
       if (
-        record.sessionId !== update.sessionId
+        record === undefined
+        || record.sessionId !== update.sessionId
         || this.productMeta(record._meta, namespace)?.sessionUpdateBatch !== undefined
       ) {
         throw new Error("ACP session update batch is invalid");
@@ -228,38 +144,6 @@ export const AcpProtocol = {
       sequence: value.sequence
     };
   },
-  /** Decodes optional initialization recovery plans from one product namespace. */
-  initializeRecovery(meta: unknown, namespace: string): InitializeRecovery | undefined {
-    const product = this.productMeta(meta, namespace);
-    if (product?.sessionRecovery === undefined) return undefined;
-    const recovery = this.decodeRecord(product.sessionRecovery, "ACP session recovery metadata");
-    if (recovery.version !== 1 || !Array.isArray(recovery.sessions)) {
-      throw new Error("ACP session recovery metadata has an unsupported version or sessions value");
-    }
-    const sessions = recovery.sessions.map((value, index) => {
-      const plan = this.decodeRecord(value, `ACP recovery plan ${index}`);
-      if (
-        typeof plan.sessionId !== "string"
-        || (plan.mode !== "watch" && plan.mode !== "resume")
-        || (plan.runId !== undefined && typeof plan.runId !== "string")
-        || (plan.nextSequence !== undefined && !this.validSequence(plan.nextSequence))
-        || (plan.running !== undefined && typeof plan.running !== "boolean")
-      ) {
-        throw new Error(`ACP recovery plan ${index} is invalid`);
-      }
-      if (plan.mode === "watch" && (typeof plan.runId !== "string" || !this.validSequence(plan.nextSequence))) {
-        throw new Error(`ACP watch recovery plan ${index} is missing its cursor`);
-      }
-      return {
-        sessionId: plan.sessionId as SessionId,
-        mode: plan.mode,
-        ...(typeof plan.runId === "string" ? { runId: plan.runId as RunId } : {}),
-        ...(this.validSequence(plan.nextSequence) ? { nextSequence: plan.nextSequence as EventSequence } : {}),
-        ...(typeof plan.running === "boolean" ? { running: plan.running } : {})
-      } satisfies SessionRecoveryPlan;
-    });
-    return { version: 1, sessions };
-  },
   /** Decodes optional atomic projection metadata from one Session notification. */
   projectionGroupMeta(meta: unknown, namespace: string): ProjectionGroupMeta | undefined {
     const product = this.productMeta(meta, namespace);
@@ -287,6 +171,34 @@ export const AcpProtocol = {
       ...(group.operationPhase === "start" || group.operationPhase === "end"
         ? { operationPhase: group.operationPhase }
         : {})
+    };
+  },
+  /** A listed Session as the app shows it: its title falls back to its id, its times come from product metadata. */
+  sessionSummary(session: SessionInfo, namespace: string): SessionSummary {
+    const details = this.productMeta(session._meta, namespace) ?? {};
+    return {
+      sessionId: session.sessionId,
+      cwd: session.cwd,
+      title: session.title?.trim() || session.sessionId,
+      ...(typeof details.createdAtMs === "string" ? { createdAtMs: details.createdAtMs as TimestampMs } : {}),
+      ...(typeof details.modifiedAtMs === "string" ? { modifiedAtMs: details.modifiedAtMs as TimestampMs } : {}),
+    };
+  },
+  /** The prompt a `session/request_permission` asks, without its queue key; `undefined` when it names no Session, title or valid option. */
+  permissionRequest(params: unknown): Omit<PermissionPrompt, "key"> | undefined {
+    const request = this.record(params);
+    const options = Array.isArray(request?.options)
+      ? request.options.flatMap((option: unknown) => {
+          const { optionId, name, kind } = this.record(option) ?? {};
+          return typeof optionId === "string" && typeof name === "string" && typeof kind === "string" ? [{ optionId, name, kind }] : [];
+        })
+      : [];
+    if (typeof request?.sessionId !== "string" || typeof request.title !== "string" || options.length === 0) return undefined;
+    return {
+      sessionId: request.sessionId as SessionId,
+      title: request.title,
+      ...(typeof request.description === "string" ? { description: request.description } : {}),
+      options,
     };
   },
   /** Returns whether a JSON value is a positive ACP event sequence. */

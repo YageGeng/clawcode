@@ -33,3 +33,40 @@ No item failed; item 4 passed with conditions, carried into N1 as composer work:
 - check Enter with a real Linux input method (fcitx or ibus) by hand once the composer exists.
 
 The probe crate (`ext/probe`) and probe pages were deleted after these runs.
+
+# R1 feasibility record
+
+Spec: [Desktop NSH design, section 9](../../docs/superpowers/specs/2026-11-25-desktop-nsh-design.md)
+
+Checked 2026-11-25 on Linux (KDE Wayland, `nsh 0.6.1`, `cargo 1.100.0`) with `iroh 1.5.0` (`presets::N0`: n0 relays and
+address lookup) and ALPN `clawcode/acp/1`. One machine only: its network exits in the US (public address of an AT&T
+range), so n0 picked `usw1-1.relay.n0.iroh.link` as the home relay.
+
+| # | Item | Result | Evidence |
+| --- | --- | --- | --- |
+| 1 | iroh beside the NSH runtime and the backend's tokio runtime | Pass on Linux; macOS and Windows not checked | `iroh = "1.5"` in the root workspace and `ext/backend`: `cargo build -p clawcode-backend` and the headless runner built with `app`, `acp` and `kernel`, no version conflicts (122 new crates in `Cargo.lock`, a few RustCrypto and `getrandom` crates in two versions). An NSH async export ran the endpoint on a tokio runtime of its own (spawn, then await a `futures` oneshot from the engine's executor) while `Backend.start()` ran the real backend on its thread. No Windows cross-compiler (`x86_64-w64-mingw32-gcc`) or macOS SDK here: those builds need CI or another machine |
+| 2 | Connectivity, first frame, streaming throughput | Pass for LAN and relay on one machine; two real devices across NAT not checked | Line-framed echo on one bidirectional stream. Direct (host address with IPs): connect 4 ms, first frame 1.1 ms, LAN path, 2500 frames (912 KiB) echoed at ~246 000 frames/s. Relay only (`clear_ip_transports`, `AddrFilter::relay_only`): connect 356 ms, first frame 405 ms, path `usw1` relay RTT ~350 ms, 2500 frames echoed in 9.0 s (~277 frames/s, ~0.1 MiB/s each way). Dial by id alone (n0 address lookup): connect 0.74 s, first frame 414 ms through the relay, then upgraded to the LAN path. Endpoints come online (home relay connected) 2.6–4 s after bind |
+| 3 | QR code | Pass | A sample pairing code (`clawcode-pair:1:` + base32 of key, 128-bit secret and expiry, + relay URL; 154 chars) rendered by the `qrcode` crate as SVG (24 KiB), shown by NSH `Image` from a `data:image/svg+xml` URI (both `;utf8,` with `encodeURIComponent` and `;base64,`) in a real window; `zbarimg` decoded the screenshot back to the exact code |
+| 4 | Two instances on one machine, separate data dirs, connecting | Pass | Two `nsh test` processes (headless, then two real GTK windows at once), each with its own `CLAW_CONFIG` data home and its own device key file, each ran `Backend.start()` (separate SQLite state) and an endpoint; the second dialed the first by id and relay URL, as a pairing code would carry them: connect 1.25 s, first frame ~550 ms through the relay, then the LAN path. The key file survived across runs (same id) |
+
+## Notes
+
+- The relay path is slow from this network: ~350 ms RTT and ~0.1 MiB/s on n0's development relay. A typing-speed
+  stream is fine; replaying a long Session (megabytes of transcript) remotely takes seconds. Choose a closer or
+  self-hosted relay before release (spec decision 6), and keep replay batched.
+- n0's endpoints need 2.6–4 s to come online. The host should bind its endpoint at startup (while remote control is on),
+  not when a remote connects; a remote's first connection pays roughly one second for lookup and the relay handshake.
+- NSH async exports run on the engine's executor, not tokio: every iroh future goes through a tokio runtime handle
+  and comes back over a channel. R1 can put the endpoint on the backend thread's runtime (spec section 3) instead of a
+  second one; the probe used its own.
+- LAN discovery (mDNS) is not part of `iroh` 1.5; n0 ships it as `iroh-mdns-address-lookup` 0.6.1
+  (n0-computer/iroh-address-lookups), not probed here. Without it, same-LAN peers still went direct after the relay
+  exchanged their addresses, but they need the relay to find each other.
+- The NSH app data directory override (two instances with separate NSH storage) is not built yet: the probe separated
+  only the backend data and the key files. R1 adds the override with the device key (N0 supplement note).
+
+## Stop gate
+
+No item failed. Item 1 passed on Linux only, and item 2 only on one machine: macOS and Windows builds and a
+two-device cross-NAT run stay open for R1's acceptance. The probe crate, the extension probe module and the probe
+pages were deleted after these runs.

@@ -1,6 +1,7 @@
 import { t } from "nsh/i18n";
 import { Folders } from "clawcode-backend";
 
+import { messageOf } from "../client/errors";
 import type { ControlSize } from "../ui/button";
 import { Select } from "../ui/selection";
 import { workspaceName } from "./workspaces";
@@ -33,7 +34,7 @@ export function WorkspacePicker(props: {
         }
         void Folders.pick().then(
           (path) => path !== null && props.onChange(path),
-          (error: unknown) => console.warn(`folder chooser: ${error instanceof Error ? error.message : String(error)}`),
+          (error: unknown) => console.warn(`folder chooser: ${messageOf(error)}`),
         );
       }}
     />

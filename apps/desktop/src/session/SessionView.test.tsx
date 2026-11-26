@@ -1,8 +1,10 @@
 import { expect, open, test } from "nsh/test";
 
+import { DESKTOP } from "../../tests/support/desktop";
+
 /** Opens a session test entry at a desktop size. */
 function openEntry(name: string, options: Record<string, unknown> = {}) {
-  return open(`../../tests/entries/${name}.tsx`, { platform: "linux", width: 1200, height: 800, ...options });
+  return open(`../../tests/entries/${name}.tsx`, { ...DESKTOP, ...options });
 }
 
 test("ended_turn_folds_work_under_worked_for", async () => {

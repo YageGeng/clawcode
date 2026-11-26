@@ -9,6 +9,7 @@ import { ListItem } from "../ui/list";
 import { StatusDot } from "../ui/surface";
 import { type } from "../ui/tokens";
 import { groupByWorkspace, recentSessions } from "./workspaces";
+import { motionClass } from "../ui/motion";
 
 /** How many Sessions "Recent" lists. */
 const RECENT_COUNT = 10;
@@ -57,7 +58,7 @@ export function SidebarRowView(props: { row: SidebarRow; context: RowContext }) 
             icon="folder"
             onPress={() => props.context.toggleWorkspace(group().cwd)}
             trailing={
-              <View class={`${group().expanded ? "rotate-90" : ""} transition-transform duration-180 motion-reduce:transition-none`}>
+              <View class={`${group().expanded ? "rotate-90" : ""} ${motionClass.turn}`}>
                 <Icon name="chevron-right" size="sm" color="muted-foreground" />
               </View>
             }

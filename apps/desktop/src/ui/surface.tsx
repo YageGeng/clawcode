@@ -3,6 +3,7 @@ import type { JSX } from "nsh/jsx-runtime";
 
 import type { Tone } from "./tokens";
 import { toneFill, toneSoft, type } from "./tokens";
+import { motionClass } from "./motion";
 
 /** Each surface's look: a content card, or the floating composer card (spec §5.1). */
 const surfaceVariant = {
@@ -36,7 +37,7 @@ export function Separator(props: { vertical?: boolean }) {
 export function StatusDot(props: { tone: Tone; label: string; live?: boolean; hideLabel?: boolean }) {
   return (
     <View class="flex-row items-center gap-1.5" accessibilityLabel={props.label}>
-      <View class={`size-2 rounded-full ${toneFill[props.tone]} ${props.live === true ? "animate-pulse motion-reduce:animate-none" : ""}`} />
+      <View class={`size-2 rounded-full ${toneFill[props.tone]} ${props.live === true ? motionClass.pulse : ""}`} />
       <If when={props.hideLabel !== true}>
         <Text class={`${type.meta} text-muted-foreground`}>{props.label}</Text>
       </If>

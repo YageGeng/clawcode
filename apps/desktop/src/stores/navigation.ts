@@ -1,5 +1,7 @@
+import type { SessionId } from "../client/acp/protocol";
+
 /** Where the app is: a host, and the open Session on it, if any. */
-export type AppLocation = Readonly<{ hostId: string; sessionId: string | null }>;
+export type AppLocation = Readonly<{ hostId: string; sessionId: SessionId | null }>;
 
 /** The most Locations the history keeps; older ones fall off the start. */
 const MAX_ENTRIES = 100;

@@ -1,4 +1,4 @@
-import { cleanup, Overlay, signal, Text, View } from "nsh";
+import { computed, effect, Overlay, signal, Text, View } from "nsh";
 import { t } from "nsh/i18n";
 import type { Signal } from "nsh";
 import { Toast as BaseToast, ToastManager, ToastStack } from "nsh/base";
@@ -61,9 +61,14 @@ export class ToastStore {
 /** The stack of toasts at the window's bottom-right edge. */
 export function Toasts(props: { store: ToastStore }) {
   const expanded = signal(false);
-  // ponytail: a fixed 100 ms tick while mounted; drive it from the manager's next deadline if it shows in traces.
-  const timer = setInterval(() => props.store.advance(expanded()), 100);
-  cleanup(() => clearInterval(timer));
+  // A 100 ms tick moves the toasts' lifecycle while any is on screen; with none, the app is left idle.
+  // ponytail: a fixed tick; drive it from the manager's next deadline if it shows in traces.
+  const showing = computed(() => props.store.visible().length > 0);
+  effect(() => {
+    if (!showing()) return;
+    const timer = setInterval(() => props.store.advance(expanded()), 100);
+    return () => clearInterval(timer);
+  });
   return (
     <Overlay class="absolute bottom-4 right-4 w-80">
       <ToastStack
@@ -74,7 +79,7 @@ export function Toasts(props: { store: ToastStore }) {
           if (newest !== undefined) props.store.dismiss(newest.id);
         }}
       >
-        <Each of={[...props.store.visible()]} key={(entry) => entry.id}>
+        <Each of={props.store.visible()} key={(entry) => entry.id}>
           {(entry) => <ToastCard entry={entry()} onDismiss={() => props.store.dismiss(entry().id)} />}
         </Each>
       </ToastStack>

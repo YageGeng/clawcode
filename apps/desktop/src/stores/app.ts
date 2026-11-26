@@ -1,7 +1,8 @@
-import { context, signal } from "nsh";
+import { signal } from "nsh";
 import type { Accessor } from "nsh";
 
 import type { SessionId } from "../client/acp/protocol";
+import { messageOf } from "../client/errors";
 import type { HostStore } from "./host";
 import { NavigationHistory } from "./navigation";
 import type { AppLocation } from "./navigation";
@@ -18,7 +19,7 @@ export type AppStore = Readonly<{
   /** Shows a host with no Session open. */
   selectHost: (hostId: string) => void;
   /** Opens a Session; the sidebar follows to its host (spec §4.4). */
-  openSession: (hostId: string, sessionId: string) => void;
+  openSession: (hostId: string, sessionId: SessionId) => void;
   /** Creates a Session in `cwd` on the host, shows it and sends `text` as its first prompt; rejects when no Session could be created. */
   startSession: (hostId: string, cwd: string, text: string) => Promise<void>;
   back: () => void;
@@ -66,8 +67,8 @@ export function createAppStore(initialHosts: readonly HostStore[]): AppStore {
       go({ hostId, sessionId });
       // Navigation shows the Session at once; its transcript arrives as the host replays it.
       find(hostId)
-        ?.openSession(sessionId as SessionId)
-        .catch((error: unknown) => console.warn(`open ${sessionId} on ${hostId}: ${error instanceof Error ? error.message : String(error)}`));
+        ?.openSession(sessionId)
+        .catch((error: unknown) => console.warn(`open ${sessionId} on ${hostId}: ${messageOf(error)}`));
     },
     startSession: async (hostId, cwd, text) => {
       const host = find(hostId);
@@ -90,14 +91,4 @@ export function createAppStore(initialHosts: readonly HostStore[]): AppStore {
       for (const host of hosts()) host.stop();
     },
   };
-}
-
-/** The app store the root provides; `undefined` outside it. */
-export const AppStoreContext = context<AppStore | undefined>(undefined);
-
-/** Reads the app store the root provides; throws outside it. */
-export function useAppStore(): AppStore {
-  const store = AppStoreContext();
-  if (store === undefined) throw new Error("useAppStore runs under AppStoreContext.Provider");
-  return store;
 }

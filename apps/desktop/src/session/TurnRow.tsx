@@ -3,13 +3,14 @@ import { t } from "nsh/i18n";
 
 import type { MessageId, ToolCallId } from "../client/acp/protocol";
 import type { MessageEntity, ToolCallEntity } from "../client/domain/model";
-import type { TurnView } from "../client/turns";
+import type { TurnView, WorkStep } from "../client/turns";
 import { MessageBubble } from "../ui/bubble";
 import { Disclosure } from "../ui/disclosure";
 import { Markdown } from "../ui/markdown";
 import { ChangeCard } from "./ChangeCard";
 import { MessageActions } from "./MessageActions";
 import { ToolGroup } from "./ToolGroup";
+import { motionClass } from "../ui/motion";
 
 /** How long a turn took, as the interface language writes it ("12s", "3m 10s"). */
 export function formatDuration(milliseconds: number): string {
@@ -28,7 +29,7 @@ export type TurnSource = Readonly<{
 
 /** A blinking caret after a streaming reply; still under reduced motion. */
 function Caret() {
-  return <View class="h-4 w-1.5 rounded-full bg-foreground animate-pulse motion-reduce:animate-none" />;
+  return <View class={`h-4 w-1.5 rounded-full bg-foreground ${motionClass.pulse}`} />;
 }
 
 /** One turn: the user's pill, the work (folded once ended), the answer, changed files and actions. */
@@ -52,21 +53,21 @@ export function TurnRow(props: { turn: TurnView; source: TurnSource }) {
           }
         >
           <View class="gap-3">
-            <Each of={[...props.turn.steps]} key={(step) => (step.type === "message" ? step.messageId : `tools:${step.toolCallIds[0]}`)}>
+            <Each of={props.turn.steps} key={(step) => step.key}>
               {(step) => (
                 // Read `step()` in bindings: a tool group gains calls while the turn runs.
                 <View>
-                  <If when={step().type === "message" ? (step() as { messageId: MessageId }).messageId : undefined}>
+                  <If when={step().type === "message" ? (step() as Extract<WorkStep, { type: "message" }>).messageId : undefined}>
                     {(id) => <Markdown text={props.source.message(id())?.text ?? ""} streaming={props.turn.running} />}
                   </If>
-                  <If when={step().type === "tools" ? (step() as Extract<TurnView["steps"][number], { type: "tools" }>) : undefined}>
+                  <If when={step().type === "tools" ? (step() as Extract<WorkStep, { type: "tools" }>) : undefined}>
                     {(tools) => (
                       <ToolGroup
                         toolCallIds={tools().toolCallIds}
                         activities={tools().activities}
                         tool={props.source.tool}
-                        open={props.source.isOpen(`tools:${tools().toolCallIds[0]}`)}
-                        onToggle={() => props.source.toggle(`tools:${tools().toolCallIds[0]}`)}
+                        open={props.source.isOpen(tools().key)}
+                        onToggle={() => props.source.toggle(tools().key)}
                       />
                     )}
                   </If>
@@ -76,21 +77,17 @@ export function TurnRow(props: { turn: TurnView; source: TurnSource }) {
           </View>
         </Disclosure>
       </If>
-      <If when={answer()}>
-        {(message) => (
-          <View class="gap-3">
-            <Markdown text={message().text} />
-            <Each of={[...props.turn.changes]} key={(change) => change.path}>
-              {(change) => <ChangeCard change={change()} />}
-            </Each>
-            <MessageActions text={message().text} timestampMs={message().endedAtMs} />
-          </View>
-        )}
-      </If>
-      <If when={props.turn.running && props.turn.changes.length > 0}>
-        <Each of={[...props.turn.changes]} key={(change) => change.path}>
-          {(change) => <ChangeCard change={change()} />}
-        </Each>
+      {/* Changed files show while the turn runs and stay, in the same place, under the answer once it ends. */}
+      <If when={answer() !== undefined || (props.turn.running && props.turn.changes.length > 0)}>
+        <View class="gap-3">
+          <If when={answer()}>{(message) => <Markdown text={message().text} />}</If>
+          <Each of={props.turn.changes} key={(change) => change.path}>
+            {(change) => <ChangeCard change={change()} />}
+          </Each>
+          <If when={answer()}>
+            {(message) => <MessageActions text={message().text} timestampMs={message().endedAtMs} />}
+          </If>
+        </View>
       </If>
     </View>
   );

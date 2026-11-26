@@ -1,60 +1,17 @@
-import type { ConfigSelect, EntryId, EventMeta, MessageId, QueueId, RunId, TurnId } from "../acp/protocol";
-import type { TerminalEntity } from "./terminals";
-import type {
-  AgentRunUsage,
-  AvailableCommandEntity,
-  CacheTrail,
-  BranchSummaryEntity,
-  CompactionEntity,
-  CompactionStatus,
-  ContextUsage,
-  EventOrder,
-  EventSequenceRange,
-  ExtensionEntity,
-  McpSessionSnapshot,
-  MessageEntity,
-  PendingMessages,
-  PlanTodo,
-  RecoveryNotice,
-  RetryStatus,
-  SessionEvent,
-  SessionPlans,
-  SessionTree,
-  SkillListResult,
-  ToolCallEntity,
-  TranscriptEntry
-} from "../domain/model";
-import { AgentRunUsages, CacheMisses, EventOrdering as Ordering, Questions } from "../domain/model";
+import type { EventMeta, MessageId, ToolCallId } from "../acp/protocol";
+import type { EventOrder, MessageEntity, ToolCallEntity, TranscriptEntry } from "../domain/model";
+import { EventOrdering } from "../domain/model";
 
+/** What one Session shows: its messages and tool calls in transcript order, and whether a turn runs. */
 export type SessionWorkspaceState = Readonly<{
   messages: ReadonlyMap<MessageId, MessageEntity>;
   transcript: readonly TranscriptEntry[];
-  tools: ReadonlyMap<string, ToolCallEntity>;
-  terminals: ReadonlyMap<string, TerminalEntity>;
-  extensions: ReadonlyMap<string, ExtensionEntity>;
-  compactions: ReadonlyMap<EntryId, CompactionEntity>;
-  branchSummaries: ReadonlyMap<MessageId, BranchSummaryEntity>;
-  turnRuns: ReadonlyMap<TurnId, RunId>;
-  runUsages: ReadonlyMap<RunId, AgentRunUsage>;
-  cacheTrail: CacheTrail;
-  events: readonly SessionEvent[];
-  pending: PendingMessages;
-  tree: SessionTree | undefined;
-  skills: SkillListResult["skills"];
-  skillDiagnostics: SkillListResult["diagnostics"];
-  availableCommands: readonly AvailableCommandEntity[];
-  configOptions: readonly ConfigSelect[];
-  plans: SessionPlans;
-  mcpSnapshot: McpSessionSnapshot;
+  tools: ReadonlyMap<ToolCallId, ToolCallEntity>;
   running: boolean;
-  contextUsage: ContextUsage | undefined;
-  retry: RetryStatus | undefined;
-  compaction: CompactionStatus;
-  outcomeUnknown: boolean;
-  diagnostics: readonly string[];
-  /** Questions this tab is answering or skipping, by `Questions.id`; kept until the server shows the settlement. */
-  settlingQuestions: ReadonlySet<string>;
 }>;
+
+/** The entities a decoder reads to merge an update into what the Session already has. */
+export type SessionEntities = Pick<SessionWorkspaceState, "messages" | "tools">;
 
 export type SessionWorkspaceAction =
   | { readonly type: "transcript/cleared" }
@@ -62,288 +19,144 @@ export type SessionWorkspaceAction =
   | { readonly type: "message/text-delta"; readonly messageId: MessageId; readonly role: "user" | "assistant"; readonly delta: string; readonly meta: EventMeta; readonly order: EventOrder }
   | { readonly type: "message/reasoning-delta"; readonly messageId: MessageId; readonly delta: string; readonly meta: EventMeta; readonly order: EventOrder }
   | { readonly type: "tool/upserted"; readonly tool: ToolCallEntity; readonly order: EventOrder }
-  | { readonly type: "terminal/upserted"; readonly terminal: TerminalEntity }
-  | { readonly type: "extension/upserted"; readonly extension: ExtensionEntity; readonly order: EventOrder }
-  | { readonly type: "compaction/upserted"; readonly compaction: CompactionEntity; readonly order: EventOrder }
-  | { readonly type: "branch-summary/upserted"; readonly branchSummary: BranchSummaryEntity; readonly order: EventOrder }
-  | { readonly type: "turn/settled"; readonly turnId: TurnId; readonly runId: RunId }
-  | { readonly type: "run/settled"; readonly runId: RunId; readonly order: EventOrder }
-  | { readonly type: "recovery/completed"; readonly notice: RecoveryNotice; readonly order: EventOrder }
-  | { readonly type: "event/received"; readonly event: SessionEvent }
-  | { readonly type: "queue/replaced"; readonly pending: PendingMessages }
-  | { readonly type: "queue/removed"; readonly queueId: QueueId }
-  | { readonly type: "tree/replaced"; readonly tree: SessionTree }
-  | { readonly type: "skills/replaced"; readonly result: SkillListResult }
-  | { readonly type: "commands/replaced"; readonly commands: readonly AvailableCommandEntity[] }
-  | { readonly type: "mcp/replaced"; readonly snapshot: McpSessionSnapshot }
-  | { readonly type: "running/changed"; readonly running: boolean }
-  | { readonly type: "usage/changed"; readonly usage: ContextUsage | undefined }
-  | { readonly type: "config/replaced"; readonly options: readonly ConfigSelect[] }
-  | { readonly type: "plans/todos"; readonly todos: readonly PlanTodo[] }
-  | { readonly type: "plans/approved"; readonly plan: string }
-  | { readonly type: "retry/changed"; readonly retry: RetryStatus | undefined }
-  | { readonly type: "compaction/changed"; readonly compaction: CompactionStatus }
-  | { readonly type: "outcome/unknown"; readonly value: boolean }
-  | { readonly type: "diagnostic/added"; readonly message: string }
-  | { readonly type: "questions/settling"; readonly ids: readonly string[]; readonly settling: boolean };
-
-/** Cap on retained ACP events; the performance blueprint treats these as debug-only. */
-export const MAX_RETAINED_SESSION_EVENTS = 2_000;
-
-/**
- * Orders and bounds the diagnostic log, keeping only the newest complete queue
- * and terminal snapshots before applying the event count limit.
- */
-export function retainEvents(events: readonly SessionEvent[]): SessionEvent[] {
-  const sorted = [...events].sort((left, right) => Ordering.compare(left.order, right.order));
-  const snapshots = new Set<string>();
-  const kept: SessionEvent[] = [];
-  for (let index = sorted.length - 1; index >= 0 && kept.length < MAX_RETAINED_SESSION_EVENTS; index -= 1) {
-    const event = sorted[index];
-    if (event === undefined) continue;
-    if (event.snapshotOf !== undefined) {
-      if (snapshots.has(event.snapshotOf)) continue;
-      snapshots.add(event.snapshotOf);
-    }
-    kept.push(event);
-  }
-  return kept.reverse();
-}
+  | { readonly type: "running/changed"; readonly running: boolean };
 
 export const initialSessionWorkspaceState: SessionWorkspaceState = {
   messages: new Map(),
   transcript: [],
   tools: new Map(),
-  terminals: new Map(),
-  extensions: new Map(),
-  compactions: new Map(),
-  branchSummaries: new Map(),
-  turnRuns: new Map(),
-  runUsages: new Map(),
-  cacheTrail: CacheMisses.empty,
-  events: [],
-  pending: { steering: [], followUp: [] },
-  tree: undefined,
-  skills: [],
-  skillDiagnostics: [],
-  availableCommands: [],
-  configOptions: [],
-  plans: {},
-  mcpSnapshot: { revision: 0, servers: [], catalog: { tools: [], prompts: [], resources: [], resourceTemplates: [] } },
-  running: false,
-  contextUsage: undefined,
-  retry: undefined,
-  compaction: { type: "idle" },
-  outcomeUnknown: false,
-  diagnostics: [],
-  settlingQuestions: new Set()
+  running: false
 };
 
-export const EventSequenceRanges = {
-  /** Extends one UI sequence range without replacing the source event order. */
-  include(range: EventSequenceRange | undefined, sequence: number): EventSequenceRange {
-    return {
-      start: Math.min(range?.start ?? sequence, sequence),
-      end: Math.max(range?.end ?? sequence, sequence)
-    };
-  }
-} as const;
+/** Retains an immutable Map until one frame action first requests a mutable view. */
+class MapDraft<K, V> {
+  private readonly base: ReadonlyMap<K, V>;
+  private mutable: Map<K, V> | undefined;
 
-/** Applies one update to the isolated projection owned by a single Session. */
-export function reduceSessionWorkspace(
-  state: SessionWorkspaceState,
-  action: SessionWorkspaceAction
-): SessionWorkspaceState {
-  switch (action.type) {
-    case "transcript/cleared": return {
-      ...initialSessionWorkspaceState,
-      // Clearing stale entities must not hide a disconnected Run whose final
-      // outcome is still unknown until a successful replay completes.
-      outcomeUnknown: state.outcomeUnknown,
-      // A replay cannot show a skip the server still holds for its Run.
-      settlingQuestions: state.settlingQuestions
-    };
-    case "message/upserted": {
-      const messages = new Map(state.messages);
-      const previous = messages.get(action.message.messageId);
-      const exists = previous !== undefined;
-      messages.set(action.message.messageId, {
-        ...action.message,
-        sequenceRange: EventSequenceRanges.include(previous?.sequenceRange, action.order.sequence)
-      });
-      const transcript = exists ? state.transcript : [...state.transcript, { type: "message" as const, messageId: action.message.messageId, order: action.order }]
-        .sort((left, right) => Ordering.compare(left.order, right.order));
-      return { ...state, messages, transcript };
-    }
-    case "message/text-delta":
-    case "message/reasoning-delta": {
-      const messages = new Map(state.messages);
-      const previous = messages.get(action.messageId);
-      const base: MessageEntity = previous ?? {
-        messageId: action.messageId,
-        turnId: action.meta.turnId,
-        role: action.type === "message/text-delta" ? action.role : "assistant",
-        text: "",
-        images: [],
-        reasoning: "",
-        timestampMs: action.meta.timestampMs,
-        startedAtMs: action.meta.timestampMs,
-        endedAtMs: action.meta.timestampMs,
-        streaming: true
-      };
-      const sequenceRange = EventSequenceRanges.include(base.sequenceRange, action.order.sequence);
-      messages.set(action.messageId, action.type === "message/text-delta"
-        ? { ...base, text: base.text + action.delta, endedAtMs: action.meta.timestampMs, streaming: true, sequenceRange }
-        : { ...base, reasoning: base.reasoning + action.delta, endedAtMs: action.meta.timestampMs, streaming: true, sequenceRange });
-      const transcript = previous === undefined ? [...state.transcript, { type: "message" as const, messageId: action.messageId, order: action.order }]
-        .sort((left, right) => Ordering.compare(left.order, right.order)) : state.transcript;
-      return { ...state, messages, transcript };
-    }
-    case "tool/upserted": {
-      const tools = new Map(state.tools);
-      const previous = tools.get(action.tool.toolCallId);
-      const exists = previous !== undefined;
-      tools.set(action.tool.toolCallId, {
-        ...action.tool,
-        sequenceRange: EventSequenceRanges.include(previous?.sequenceRange, action.order.sequence)
-      });
-      const transcript = exists ? state.transcript : [...state.transcript, { type: "tool" as const, toolCallId: action.tool.toolCallId, order: action.order }]
-        .sort((left, right) => Ordering.compare(left.order, right.order));
-      return { ...state, tools, transcript };
-    }
-    case "terminal/upserted": {
-      const terminals = new Map(state.terminals);
-      terminals.set(action.terminal.terminalId, action.terminal);
-      return { ...state, terminals };
-    }
-    case "extension/upserted": {
-      const extensions = new Map(state.extensions);
-      const exists = extensions.has(action.extension.id);
-      extensions.set(action.extension.id, action.extension);
-      const transcript = exists ? state.transcript : [...state.transcript, { type: "extension" as const, extensionEventId: action.extension.id, order: action.order }]
-        .sort((left, right) => Ordering.compare(left.order, right.order));
-      // Once the server shows a settlement, this tab stops hiding it on its own.
-      return { ...state, extensions, transcript, settlingQuestions: Questions.settled(state.settlingQuestions, action.extension) };
-    }
-    case "compaction/upserted": {
-      const compactions = new Map(state.compactions);
-      const exists = compactions.has(action.compaction.entryId);
-      compactions.set(action.compaction.entryId, action.compaction);
-      const transcript = exists ? state.transcript : [...state.transcript, { type: "compaction" as const, entryId: action.compaction.entryId, order: action.order }]
-        .sort((left, right) => Ordering.compare(left.order, right.order));
-      return { ...state, compactions, transcript };
-    }
-    case "branch-summary/upserted": {
-      const branchSummaries = new Map(state.branchSummaries);
-      const exists = branchSummaries.has(action.branchSummary.messageId);
-      branchSummaries.set(action.branchSummary.messageId, action.branchSummary);
-      const transcript = exists ? state.transcript : [...state.transcript, { type: "branchSummary" as const, messageId: action.branchSummary.messageId, order: action.order }]
-        .sort((left, right) => Ordering.compare(left.order, right.order));
-      return { ...state, branchSummaries, transcript };
-    }
-    case "turn/settled": {
-      if (state.turnRuns.has(action.turnId)) return state;
-      const turnMessages = [...state.messages.values()].filter((message) => message.turnId === action.turnId);
-      const assistants = turnMessages.flatMap((message) => message.assistant === undefined ? [] : [message.assistant]);
-      const turnRuns = new Map(state.turnRuns);
-      turnRuns.set(action.turnId, action.runId);
-      if (assistants.length === 0) return { ...state, turnRuns };
-      // Usage is final once the Turn settles, so cache misses are judged exactly once here.
-      const cacheTrail = CacheMisses.settleTurn(state.cacheTrail, turnMessages);
-      const runUsages = new Map(state.runUsages);
-      // TurnEnd contributes exactly once to its owning Run, but presentation
-      // waits for the later RunEnd boundary of the complete Agent loop.
-      runUsages.set(action.runId, AgentRunUsages.settleTurn(runUsages.get(action.runId), assistants));
-      return {
-        ...state,
-        turnRuns,
-        runUsages,
-        cacheTrail
-      };
-    }
-    case "run/settled": {
-      // Plans published by this Run are done once it ends, so the panel
-      // collapses but keeps them; RunEnd replays, so a reload agrees.
-      const next = state.plans.settled === false ? { ...state, plans: { ...state.plans, settled: true } } : state;
-      const previous = state.runUsages.get(action.runId);
-      if (previous === undefined || previous.settled) return next;
-      const runUsages = new Map(state.runUsages);
-      runUsages.set(action.runId, { ...previous, settled: true });
-      return {
-        ...next,
-        runUsages,
-        transcript: [...state.transcript, { type: "agent_usage" as const, runId: action.runId, order: action.order }]
-          .sort((left, right) => Ordering.compare(left.order, right.order))
-      };
-    }
-    case "recovery/completed": {
-      const exists = state.transcript.some((entry) => entry.type === "recovery"
-        && entry.notice.recoveryId === action.notice.recoveryId);
-      if (exists) return state;
-      return {
-        ...state,
-        transcript: [...state.transcript, { type: "recovery" as const, notice: action.notice, order: action.order }]
-          .sort((left, right) => Ordering.compare(left.order, right.order))
-      };
-    }
-    case "event/received": return { ...state, events: retainEvents([...state.events, action.event]) };
-    case "queue/replaced": return {
-      ...state,
-      // A delayed snapshot must not reintroduce a queue item whose user
-      // message has already entered the transcript.
-      pending: {
-        steering: action.pending.steering.filter((item) => {
-          const messageId = item.message.message_id;
-          return typeof messageId !== "string"
-            || state.messages.get(messageId as MessageId)?.role !== "user";
-        }),
-        followUp: action.pending.followUp.filter((item) => {
-          const messageId = item.message.message_id;
-          return typeof messageId !== "string"
-            || state.messages.get(messageId as MessageId)?.role !== "user";
-        })
+  /** Creates a lazy frame-local Map backed by the current immutable projection. */
+  constructor(base: ReadonlyMap<K, V>) {
+    this.base = base;
+  }
+
+  /** Returns the current read view without forcing a collection copy. */
+  read(): ReadonlyMap<K, V> {
+    return this.mutable ?? this.base;
+  }
+
+  /** Returns a mutable frame view, copying the base collection at most once. */
+  write(): Map<K, V> {
+    this.mutable ??= new Map(this.base);
+    return this.mutable;
+  }
+
+  /** Replaces the frame view after an action that resets the whole collection. */
+  replace(value: Map<K, V>): void {
+    this.mutable = value;
+  }
+}
+
+/**
+ * Applies a transport frame's actions to one Session, copying each collection at most once
+ * per frame instead of once per action. The only implementation of the Session actions:
+ * `reduceSessionWorkspace` runs a single action through it.
+ */
+export class SessionWorkspaceStager {
+  private readonly base: SessionWorkspaceState;
+  private readonly messages: MapDraft<MessageId, MessageEntity>;
+  private readonly tools: MapDraft<ToolCallId, ToolCallEntity>;
+  private transcript: readonly TranscriptEntry[];
+  // New entries of this frame; `commit` puts them in order.
+  private appended: TranscriptEntry[] = [];
+  private running: boolean;
+  private touched = false;
+
+  /** Creates one frame-local draft over `base`, sharing its collections until they change. */
+  constructor(base: SessionWorkspaceState) {
+    this.base = base;
+    this.messages = new MapDraft(base.messages);
+    this.tools = new MapDraft(base.tools);
+    this.transcript = base.transcript;
+    this.running = base.running;
+  }
+
+  /** The entities as this frame has left them so far. */
+  snapshot(): SessionEntities {
+    return { messages: this.messages.read(), tools: this.tools.read() };
+  }
+
+  /** Applies one Session action. */
+  apply(action: SessionWorkspaceAction): void {
+    // Setting the run state it already has changes nothing, so the Session keeps its identity.
+    if (action.type === "running/changed" && action.running === this.running) return;
+    this.touched = true;
+    switch (action.type) {
+      // Run state is not transcript: a replay keeps it.
+      case "transcript/cleared":
+        this.messages.replace(new Map());
+        this.tools.replace(new Map());
+        this.transcript = [];
+        this.appended = [];
+        return;
+      case "message/upserted": {
+        const messages = this.messages.write();
+        if (!messages.has(action.message.messageId)) this.appended.push({ type: "message", messageId: action.message.messageId, order: action.order });
+        messages.set(action.message.messageId, action.message);
+        return;
       }
-    };
-    case "queue/removed": return {
-      ...state,
-      pending: {
-        steering: state.pending.steering.filter((item) => item.queueId !== action.queueId),
-        followUp: state.pending.followUp.filter((item) => item.queueId !== action.queueId)
-      }
-    };
-    case "tree/replaced": return { ...state, tree: action.tree };
-    case "skills/replaced": return { ...state, skills: action.result.skills, skillDiagnostics: action.result.diagnostics };
-    case "commands/replaced": return { ...state, availableCommands: action.commands };
-    case "mcp/replaced": return action.snapshot.revision < state.mcpSnapshot.revision
-      ? state
-      : { ...state, mcpSnapshot: action.snapshot };
-    case "running/changed": return action.running
-      ? { ...state, running: true }
-      : {
-          ...state,
-          running: false,
-          retry: state.retry?.type === "finished" ? state.retry : undefined,
-          compaction: state.compaction.type === "running" ? { type: "idle" } : state.compaction,
-          // An idle server holds no skip: each one is written or was lost with
-          // its process, so a lost skip's question shows again.
-          settlingQuestions: initialSessionWorkspaceState.settlingQuestions
+      case "message/text-delta":
+      case "message/reasoning-delta": {
+        const messages = this.messages.write();
+        const previous = messages.get(action.messageId);
+        const base: MessageEntity = previous ?? {
+          messageId: action.messageId,
+          role: action.type === "message/text-delta" ? action.role : "assistant",
+          text: "",
+          reasoning: "",
+          startedAtMs: action.meta.timestampMs,
+          endedAtMs: action.meta.timestampMs
         };
-    case "usage/changed": return { ...state, contextUsage: action.usage };
-    case "config/replaced": return { ...state, configOptions: action.options };
-    // New plan content belongs to a Run in progress, so the panel opens again.
-    case "plans/todos": return { ...state, plans: { ...state.plans, todos: action.todos, settled: false } };
-    case "plans/approved": return { ...state, plans: { ...state.plans, approvedPlan: action.plan, settled: false } };
-    case "retry/changed": return { ...state, retry: action.retry };
-    case "compaction/changed": return { ...state, compaction: action.compaction };
-    case "outcome/unknown": return { ...state, outcomeUnknown: action.value };
-    case "diagnostic/added": return { ...state, diagnostics: [...state.diagnostics, action.message] };
-    case "questions/settling": {
-      const settlingQuestions = new Set(state.settlingQuestions);
-      for (const id of action.ids) {
-        if (action.settling) settlingQuestions.add(id);
-        else settlingQuestions.delete(id);
+        if (previous === undefined) this.appended.push({ type: "message", messageId: action.messageId, order: action.order });
+        messages.set(action.messageId, action.type === "message/text-delta"
+          ? { ...base, text: base.text + action.delta, endedAtMs: action.meta.timestampMs }
+          : { ...base, reasoning: base.reasoning + action.delta, endedAtMs: action.meta.timestampMs });
+        return;
       }
-      return { ...state, settlingQuestions };
+      case "tool/upserted": {
+        const tools = this.tools.write();
+        if (!tools.has(action.tool.toolCallId)) this.appended.push({ type: "tool", toolCallId: action.tool.toolCallId, order: action.order });
+        tools.set(action.tool.toolCallId, action.tool);
+        return;
+      }
+      case "running/changed":
+        this.running = action.running;
+        return;
     }
   }
+
+  /** The Session after this frame; `base` itself when no action reached it. */
+  commit(): SessionWorkspaceState {
+    if (!this.touched) return this.base;
+    return {
+      messages: this.messages.read(),
+      transcript: this.mergedTranscript(),
+      tools: this.tools.read(),
+      running: this.running
+    };
+  }
+
+  /** The transcript with this frame's entries in order: appended at the end when they follow it, as live updates do. */
+  private mergedTranscript(): readonly TranscriptEntry[] {
+    if (this.appended.length === 0) return this.transcript;
+    const appended = this.appended.sort((left, right) => EventOrdering.compare(left.order, right.order));
+    const last = this.transcript.at(-1);
+    if (last === undefined || EventOrdering.compare(last.order, appended[0]!.order) <= 0) return [...this.transcript, ...appended];
+    return [...this.transcript, ...appended].sort((left, right) => EventOrdering.compare(left.order, right.order));
+  }
+}
+
+/** Applies one action to one Session. */
+export function reduceSessionWorkspace(state: SessionWorkspaceState, action: SessionWorkspaceAction): SessionWorkspaceState {
+  const stager = new SessionWorkspaceStager(state);
+  stager.apply(action);
+  return stager.commit();
 }

@@ -1,9 +1,8 @@
 import type { SessionId, SessionUpdateNotification } from "../acp/protocol";
-import type { EventOrder, EventSequenceRange, RecoveryCommit } from "../domain/model";
-import { sessionWorkspace } from "./state";
-import { reduceWorkspace } from "./state";
+import { reduceWorkspace, sessionWorkspace } from "./state";
 import type { WorkspaceAction, WorkspaceState } from "./state";
-import { SessionWorkspaceStager } from "./sessionStaging";
+import { SessionWorkspaceStager } from "./sessionState";
+import type { SessionWorkspaceState } from "./sessionState";
 import { SessionRecoveryBuffer } from "./recovery";
 import { SessionUpdateDecoder } from "./updateDecoder";
 
@@ -12,52 +11,36 @@ export type WorkspaceStoreAccess = Readonly<{
   dispatch: (action: WorkspaceAction) => void;
 }>;
 
-type RecoveryTracker = {
-  eventCount: number;
-  sequenceRange?: EventSequenceRange;
-  order?: EventOrder;
-};
+/** What the router asks its host to fetch again after a frame. */
+export type RouterRefreshes = Readonly<{
+  /** Re-reads one Session's run state (an idle update may race a new turn). */
+  runtime: (sessionId: SessionId) => Promise<void>;
+  /** Re-lists the Sessions (a spawn tool named a child the list does not have yet). */
+  sessions: () => Promise<void>;
+}>;
 
 /** Routes decoded ACP updates into one injected workspace projection. */
 export class SessionUpdateRouter {
   private readonly decoder: SessionUpdateDecoder;
   private readonly store: WorkspaceStoreAccess;
-  private readonly refreshSessionRuntime: (sessionId: SessionId) => Promise<void>;
-  private readonly refreshSessionTree: (sessionId: SessionId) => Promise<void>;
-  private readonly listSession: (sessionId: SessionId) => Promise<void>;
+  private readonly refreshes: RouterRefreshes;
   private readonly recovery: SessionRecoveryBuffer;
-  private readonly recoveryTrackers = new Map<SessionId, RecoveryTracker>();
   private receivedOrder = 0;
-  private recoveryId = 0;
 
   /** Creates a router whose state reads and writes use the same store instance. */
-  constructor(
-    namespace: string,
-    store: WorkspaceStoreAccess,
-    refreshSessionRuntime: (sessionId: SessionId) => Promise<void>,
-    refreshSessionTree: (sessionId: SessionId) => Promise<void>,
-    listSession: (sessionId: SessionId) => Promise<void>
-  ) {
+  constructor(namespace: string, store: WorkspaceStoreAccess, refreshes: RouterRefreshes) {
     this.decoder = new SessionUpdateDecoder(namespace);
     this.recovery = new SessionRecoveryBuffer(namespace);
     this.store = store;
-    this.refreshSessionRuntime = refreshSessionRuntime;
-    this.refreshSessionTree = refreshSessionTree;
-    this.listSession = listSession;
+    this.refreshes = refreshes;
   }
 
-  /** Routes every update into its owning Session, including background Sessions. */
-  apply(notification: SessionUpdateNotification): void {
-    this.applyMany([notification]);
-  }
-
-  /** Applies one transport frame while committing its UI actions only once. */
+  /** Applies one transport frame's updates, committing their actions to the store once. */
   applyMany(notifications: readonly SessionUpdateNotification[]): void {
     const current = this.store.getState();
     let workspaceDraft = current;
     const refreshRuntime = new Set<SessionId>();
-    const refreshTree = new Set<SessionId>();
-    const childSessions = new Set<SessionId>();
+    let newChild = false;
     const touchedSessions = new Set<SessionId>();
     const stagers = new Map<SessionId, SessionWorkspaceStager>();
     try {
@@ -66,143 +49,61 @@ export class SessionUpdateRouter {
         const batch = this.recovery.accept(notification);
         if (batch === undefined) continue;
         for (const item of batch.notifications) {
-          // One copy-on-write stager per Session keeps the collection copies and
-          // transcript/event sorts at once per transport frame instead of once
-          // per decoded action.
+          // One copy-on-write stager per Session copies each collection once per frame, not once per action.
           let stager = stagers.get(item.sessionId);
           if (stager === undefined) {
             stager = new SessionWorkspaceStager(sessionWorkspace(current, item.sessionId));
             stagers.set(item.sessionId, stager);
           }
-          const decoded = this.decoder.decode(item, stager.snapshot(), ++this.receivedOrder);
+          const entities = stager.snapshot();
+          const decoded = this.decoder.decode(item, entities, ++this.receivedOrder);
           if (decoded.scope === "global") {
             for (const action of decoded.actions) workspaceDraft = reduceWorkspace(workspaceDraft, action);
           } else {
             for (const action of decoded.actions) {
+              if (action.type === "tool/upserted") {
+                const child = action.tool.subagentSessionId;
+                // List a child once, when its spawn tool first names it, not on every later update of that tool.
+                if (child !== undefined && entities.tools.get(action.tool.toolCallId)?.subagentSessionId === undefined
+                  && !workspaceDraft.sessions.some((session) => session.sessionId === child)) newChild = true;
+              }
               stager.apply(action);
-              if (action.type === "tool/upserted" && action.tool.subagentSessionId !== undefined) childSessions.add(action.tool.subagentSessionId);
             }
-            // Recovery reloads the Tree once it completes, so its replayed Turns do not each fetch one.
-            if (decoded.refreshTree === true && !this.recoveryTrackers.has(batch.sessionId)) refreshTree.add(batch.sessionId);
           }
           if (decoded.refreshRuntime) refreshRuntime.add(batch.sessionId);
-        }
-        const tracker = this.recoveryTrackers.get(batch.sessionId);
-        if (tracker !== undefined && batch.cursor !== undefined) {
-          // Projection groups may coalesce several source events into one ACP
-          // notification frame, so count the authoritative sequence range once.
-          tracker.eventCount += batch.cursor.lastSequence - batch.cursor.sequence + 1;
-          tracker.sequenceRange = {
-            start: Math.min(tracker.sequenceRange?.start ?? batch.cursor.sequence, batch.cursor.sequence),
-            end: Math.max(tracker.sequenceRange?.end ?? batch.cursor.lastSequence, batch.cursor.lastSequence)
-          };
-          tracker.order = {
-            sequence: batch.cursor.lastSequence,
-            receivedOrder: this.receivedOrder
-          };
         }
         // Stage the cursor synchronously so the next projection group in this
         // physical frame validates against it. No observer can run before dispatch.
         this.recovery.commit(batch);
       }
-      if (stagers.size > 0 || workspaceDraft !== current) {
-        this.store.dispatch({ type: "workspace/committed", state: this.commitStaged(current, workspaceDraft, stagers) });
-      }
+      const committed = this.commitStaged(workspaceDraft, stagers);
+      if (committed !== current) this.store.dispatch({ type: "workspace/committed", state: committed });
     } catch (reason: unknown) {
-      for (const sessionId of touchedSessions) {
-        this.recovery.requireFullReplay(sessionId);
-        // Drop any partially-populated summary so a later finishRecovery cannot
-        // emit a divider that under-counts a frame whose replay never completed.
-        this.recoveryTrackers.delete(sessionId);
-      }
+      for (const sessionId of touchedSessions) this.recovery.requireFullReplay(sessionId);
       throw reason;
     }
-    // Background refresh failures surface as Session diagnostics instead of rejecting the frame.
-    const report = (sessionId: SessionId) => (reason: unknown) => {
-      this.store.dispatch({
-        type: "session/updated",
-        sessionId,
-        action: { type: "diagnostic/added", message: reason instanceof Error ? reason.message : String(reason) }
-      });
-    };
-    for (const sessionId of refreshRuntime) void this.refreshSessionRuntime(sessionId).catch(report(sessionId));
-    // List children named by spawn and follow-up cards from the data path: the
-    // card is not mounted while another Session is open, so the Sidebar would
-    // lag until a Run idles.
-    for (const childId of childSessions) void this.listSession(childId).catch(() => {});
-    // A runtime refresh reloads the Tree too, so one frame never fetches it twice.
-    for (const sessionId of refreshTree) {
-      if (!refreshRuntime.has(sessionId)) void this.refreshSessionTree(sessionId).catch(report(sessionId));
+    for (const sessionId of refreshRuntime) {
+      void this.refreshes.runtime(sessionId).catch((reason: unknown) => console.warn(`refresh the run state of ${sessionId}: ${String(reason)}`));
     }
+    // From the data path: the spawn card is not mounted while another Session is open,
+    // so the sidebar would lag until a Run idles.
+    if (newChild) void this.refreshes.sessions().catch(() => {});
   }
 
-  /** Merges staged Session projections into one committed WorkspaceState. */
-  private commitStaged(
-    current: WorkspaceState,
-    workspaceDraft: WorkspaceState,
-    stagers: ReadonlyMap<SessionId, SessionWorkspaceStager>
-  ): WorkspaceState {
-    if (stagers.size === 0) return workspaceDraft;
-    const sessionWorkspaces = new Map(workspaceDraft.sessionWorkspaces);
-    let runningSessionIds: Set<SessionId> | undefined;
+  /** Merges staged Session projections into one WorkspaceState; `workspaceDraft` itself when no Session changed. */
+  private commitStaged(workspaceDraft: WorkspaceState, stagers: ReadonlyMap<SessionId, SessionWorkspaceStager>): WorkspaceState {
+    let sessionWorkspaces: Map<SessionId, SessionWorkspaceState> | undefined;
     for (const [sessionId, stager] of stagers) {
       const committed = stager.commit();
-      const base = sessionWorkspace(current, sessionId);
-      if (committed.running !== base.running) {
-        // Copy-on-write the running set only when a Session actually changed state.
-        runningSessionIds ??= new Set(workspaceDraft.runningSessionIds);
-        if (committed.running) runningSessionIds.add(sessionId);
-        else runningSessionIds.delete(sessionId);
-      }
+      if (committed === sessionWorkspace(workspaceDraft, sessionId)) continue;
+      sessionWorkspaces ??= new Map(workspaceDraft.sessionWorkspaces);
       sessionWorkspaces.set(sessionId, committed);
     }
-    return { ...workspaceDraft, sessionWorkspaces, ...(runningSessionIds === undefined ? {} : { runningSessionIds }) };
-  }
-
-  /** Returns every cursor whose complete projection group has reached the store. */
-  recoveryCursors() {
-    return this.recovery.cursors();
-  }
-
-  /** Starts a fresh replay summary for one Session resume request. */
-  beginRecovery(sessionId: SessionId): void {
-    this.recoveryTrackers.set(sessionId, { eventCount: 0 });
-  }
-
-  /** Returns the completed replay summary without retaining stale tracker state. */
-  finishRecovery(sessionId: SessionId): RecoveryCommit | undefined {
-    const tracker = this.recoveryTrackers.get(sessionId);
-    this.recoveryTrackers.delete(sessionId);
-    if (tracker?.sequenceRange === undefined || tracker.order === undefined) return undefined;
-    return {
-      notice: {
-        recoveryId: `${sessionId}:${tracker.sequenceRange.start}:${tracker.sequenceRange.end}:${++this.recoveryId}`,
-        eventCount: tracker.eventCount,
-        sequenceRange: tracker.sequenceRange
-      },
-      order: tracker.order
-    };
-  }
-
-  /** Drops an incomplete replay summary after a failed resume request. */
-  cancelRecovery(sessionId: SessionId): void {
-    this.recoveryTrackers.delete(sessionId);
-  }
-
-  /** Drops incomplete groups that cannot cross one WebSocket generation boundary. */
-  discardPendingRecovery(): void {
-    this.recovery.discardPending();
-    this.recoveryTrackers.clear();
+    return sessionWorkspaces === undefined ? workspaceDraft : { ...workspaceDraft, sessionWorkspaces };
   }
 
   /** Forces one Session to recover from a full standard ACP replay. */
   requireFullReplay(sessionId: SessionId): void {
     this.recovery.requireFullReplay(sessionId);
-  }
-
-  /** Removes retained and partial recovery state for one deleted Session. */
-  resetRecovery(sessionId: SessionId): void {
-    this.recovery.reset(sessionId);
-    this.recoveryTrackers.delete(sessionId);
   }
 }

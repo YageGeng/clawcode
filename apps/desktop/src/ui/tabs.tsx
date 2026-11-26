@@ -18,7 +18,7 @@ export function Tabs(props: { items: readonly TabItem[]; value: string; accessib
       class={`flex-row gap-1 border-b border-border ${props.class ?? ""}`}
       indicatorClass={`bottom-0 h-[2px] rounded-full bg-primary ${motionClass.move}`}
     >
-      <Each of={[...props.items]} key={(item) => item.value}>
+      <Each of={props.items} key={(item) => item.value}>
         {(item) => (
           <Tab
             selected={props.value === item().value}

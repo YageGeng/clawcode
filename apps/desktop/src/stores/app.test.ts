@@ -1,5 +1,6 @@
 import { expect, test } from "nsh/test";
 
+import type { SessionId } from "../client/acp/protocol";
 import { acpPeer, MemoryTransport } from "../../tests/support/memoryTransport";
 import { createAppStore } from "./app";
 import { createHostStore } from "./host";
@@ -22,7 +23,7 @@ test("selecting_a_host_navigates_and_back_returns", () => {
 
 test("opening_a_session_on_another_host_switches_current_host", () => {
   const store = createAppStore([host("a"), host("b")]);
-  store.openSession("b", "s1");
+  store.openSession("b", "s1" as SessionId);
   expect(store.currentHost().info.id).toBe("b");
   expect(store.location().sessionId).toBe("s1");
 });
@@ -38,6 +39,6 @@ test("one_host_failing_leaves_others_ready", async () => {
 test("unknown_host_keeps_the_location", () => {
   const store = createAppStore([host("a")]);
   store.selectHost("nope");
-  store.openSession("nope", "s1");
+  store.openSession("nope", "s1" as SessionId);
   expect(store.location()).toEqual({ hostId: "a", sessionId: null });
 });

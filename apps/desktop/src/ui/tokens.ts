@@ -9,15 +9,6 @@ export const type = {
 /** A meaning a status color carries; `neutral` carries none. */
 export type Tone = "neutral" | "success" | "warning" | "danger" | "info";
 
-/** The text color of each tone, from the theme's status roles. */
-export const toneText: Readonly<Record<Tone, string>> = {
-  neutral: "text-muted-foreground",
-  success: "text-success",
-  warning: "text-warning",
-  danger: "text-destructive",
-  info: "text-info",
-};
-
 /** A quiet tinted background and its text, for badges and banners of each tone. */
 export const toneSoft: Readonly<Record<Tone, string>> = {
   neutral: "bg-muted text-muted-foreground",

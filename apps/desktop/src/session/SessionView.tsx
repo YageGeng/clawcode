@@ -4,6 +4,7 @@ import { t } from "nsh/i18n";
 
 import type { MessageId, SessionId, ToolCallId } from "../client/acp/protocol";
 import { groupTurns } from "../client/turns";
+import type { TurnView } from "../client/turns";
 import { Composer } from "../composer/Composer";
 import type { HostStore } from "../stores/host";
 import { Appear } from "../ui/appear";
@@ -19,10 +20,11 @@ const BOTTOM_THRESHOLD = 48;
 /** One open Session: its header, its transcript as turns, and the composer. */
 export function SessionView(props: { host: HostStore; sessionId: SessionId }) {
   const summary = () => props.host.sessions().find((session) => session.sessionId === props.sessionId);
-  const session = computed(() => props.host.workspace().sessionWorkspaces.get(props.sessionId));
-  const turns = computed(() => {
+  const session = computed(() => props.host.session(props.sessionId));
+  // Unchanged turns keep their identity (see `groupTurns`): a streamed token redraws only its message's text.
+  const turns = computed<readonly TurnView[]>((previous) => {
     const current = session();
-    return current === undefined ? [] : groupTurns(current);
+    return current === undefined ? [] : groupTurns(current, previous);
   });
   // Parts the user unfolded, by key; kept here, not in list cells (cells are reused for other turns).
   const opened = signal<ReadonlySet<string>>(new Set());
@@ -58,7 +60,7 @@ export function SessionView(props: { host: HostStore; sessionId: SessionId }) {
       <View class="flex-1">
         <List
           ref={list}
-          each={[...turns()]}
+          each={turns()}
           keyExtractor={(turn) => turn.key}
           estimatedItemSize={160}
           maintainVisibleContentPosition={{ autoscrollToBottomThreshold: BOTTOM_THRESHOLD }}

@@ -1,11 +1,13 @@
 import { expect, test } from "nsh/test";
 
+import type { SessionId } from "../client/acp/protocol";
 import { NavigationHistory } from "./navigation";
 import type { AppLocation } from "./navigation";
 
 /** A Location on host `h` with Session `s`. */
 function at(sessionId: string | null, hostId = "h"): AppLocation {
-  return { hostId, sessionId };
+  // Plain strings stand in for Session ids here.
+  return { hostId, sessionId: sessionId as SessionId | null };
 }
 
 test("back_and_forward_walk_the_history", () => {

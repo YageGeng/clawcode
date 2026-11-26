@@ -17,7 +17,7 @@ test("router_dispatches_through_the_injected_store", () => {
     },
   };
   const idle = () => Promise.resolve();
-  const router = new SessionUpdateRouter("clawcode", store, idle, idle, idle);
+  const router = new SessionUpdateRouter("clawcode", store, { runtime: idle, sessions: idle });
   const sessionId = "session-1" as SessionId;
   const notification = {
     sessionId,
@@ -29,7 +29,7 @@ test("router_dispatches_through_the_injected_store", () => {
     },
   } as unknown as SessionUpdateNotification;
 
-  router.apply(notification);
+  router.applyMany([notification]);
 
   expect(actions.length).toBeGreaterThan(0);
   const session = state.sessionWorkspaces.get(sessionId);

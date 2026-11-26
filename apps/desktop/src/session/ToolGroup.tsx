@@ -31,7 +31,7 @@ export function ToolGroup(props: {
   return (
     <Disclosure label={label()} icon={activityIcon[props.activities[0] ?? "other"]} open={props.open} onToggle={props.onToggle}>
       <View class="ml-2.5 gap-1.5 border-l border-border pl-4">
-        <Each of={[...props.toolCallIds]}>
+        <Each of={props.toolCallIds}>
           {(id) => (
             <View class="flex-row items-center gap-2">
               <Icon name={activityIcon[props.activities[0] ?? "other"]} size="sm" color="muted-foreground" />

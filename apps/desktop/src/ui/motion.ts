@@ -1,3 +1,5 @@
+import { LayoutAnimation, reduceMotion } from "nsh";
+
 /** The app's motion tokens (DESIGN.md, "Motion tokens"): durations in ms, easings, distances and scales. */
 export const motion = {
   instant: 120,
@@ -42,4 +44,15 @@ export const motionClass = {
   move: "transition-all duration-240 ease-in-out motion-reduce:transition-none",
   /** A glyph swapping: the outgoing and incoming icons fade across. */
   swap: "transition-opacity duration-240 ease-in-out motion-reduce:transition-none",
+  /** A disclosure chevron turning toward what it opened; add `rotate-90` (or a variant of it) when open. */
+  turn: "transition-transform duration-180 motion-reduce:transition-none",
+  /** Something working without an end in sight: a spinner. */
+  spin: "animate-spin motion-reduce:animate-none",
+  /** Something live or loading: a caret, a dot, a skeleton. */
+  pulse: "animate-pulse motion-reduce:animate-none",
 } as const;
+
+/** Glides the next layout change (a panel opening, the composer growing) unless the user asked for less motion. */
+export function glideNextLayout(): void {
+  if (!reduceMotion()) LayoutAnimation.configureNext(LayoutAnimation.create(motion.base, "easeInEaseOut", "opacity"));
+}

@@ -1,4 +1,5 @@
 import type { AcpTransport } from "../transport";
+import { messageOf } from "../errors";
 import { AcpProtocol } from "./protocol";
 import type { JsonRpcError, JsonRpcMessage } from "./protocol";
 
@@ -20,10 +21,9 @@ export type AcpNotification = Readonly<{
 export type AcpRequestHandler = (params: unknown, signal: AbortSignal) => Promise<unknown>;
 
 export type AcpConnectionCallbacks = Readonly<{
-  notifications: (notifications: readonly AcpNotification[]) => void;
+  notification: (notification: AcpNotification) => void;
   diagnostic: (message: string) => void;
   closed: (reason: string) => void;
-  activity: () => void;
 }>;
 
 export class AcpRequestError extends Error {
@@ -33,18 +33,6 @@ export class AcpRequestError extends Error {
     super(`ACP ${rpc.code}: ${rpc.message}`);
     this.name = "AcpRequestError";
     this.rpc = rpc;
-  }
-
-  /** Matches the server's exact missing-session payload, never a generic internal or network error. */
-  isSessionNotFound(sessionId: string): boolean {
-    return this.rpc.code === -32603 && this.rpc.data === `session not found: ${sessionId}`;
-  }
-
-  /** Names the login method that resolves this failure when the agent reported `auth_required`. */
-  get authMethodId(): string | undefined {
-    const data = this.rpc.data;
-    if (this.rpc.code !== -32000 || typeof data !== "object" || data === null || !("methodId" in data)) return undefined;
-    return typeof data.methodId === "string" ? data.methodId : undefined;
   }
 }
 
@@ -197,12 +185,9 @@ export class AcpConnection {
       }
       message = record as JsonRpcMessage;
     } catch (reason: unknown) {
-      this.callbacks.diagnostic(
-        reason instanceof Error ? reason.message : String(reason)
-      );
+      this.callbacks.diagnostic(messageOf(reason));
       return;
     }
-    this.callbacks.activity();
     if ("id" in message && !("method" in message)) {
       const pending = this.pending.get(message.id);
       if (pending === undefined) {
@@ -228,9 +213,9 @@ export class AcpConnection {
       return;
     }
     // One frame carries one notification; a negotiated batch carrier is
-    // expanded later by the controller, which knows the product namespace.
+    // expanded later by the host, which knows the product namespace.
     if ("method" in message) {
-      this.callbacks.notifications([{ method: message.method, params: message.params }]);
+      this.callbacks.notification({ method: message.method, params: message.params });
     }
   }
 
@@ -243,7 +228,7 @@ export class AcpConnection {
         this.transport.send(JSON.stringify({ jsonrpc: "2.0", id, ...body }));
       } catch (reason: unknown) {
         // A transport that is closing (a WebSocket in CLOSING) has nobody to answer either.
-        this.callbacks.diagnostic(`Dropped the reply to ${method}: ${reason instanceof Error ? reason.message : String(reason)}`);
+        this.callbacks.diagnostic(`Dropped the reply to ${method}: ${messageOf(reason)}`);
       }
     };
     const handler = this.handlers.get(method);
@@ -258,7 +243,7 @@ export class AcpConnection {
       .catch((reason: unknown) => reply({
         error: reason instanceof AcpRequestError
           ? reason.rpc
-          : { code: -32603, message: reason instanceof Error ? reason.message : String(reason) }
+          : { code: -32603, message: messageOf(reason) }
       }))
       .finally(() => this.inbound.delete(id));
   }

@@ -71,7 +71,7 @@ export function TreeList(props: {
         <View class="flex-row items-center gap-1" style={{ paddingLeft: entry.depth * 12 }}>
           <View class="size-4 items-center justify-center">
             <If when={entry.folder}>
-              <View class={`group-aria-expanded:rotate-90 transition-transform duration-180 motion-reduce:transition-none`}>
+              <View class={`group-aria-expanded:rotate-90 ${motionClass.turn}`}>
                 <Icon name="chevron-right" size="sm" color="muted-foreground" />
               </View>
             </If>

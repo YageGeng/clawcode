@@ -28,7 +28,7 @@ export function Disclosure(props: {
         <If when={props.icon}>{(icon) => <Icon name={icon()} size="sm" color="muted-foreground" />}</If>
         <Text class={`${type.ui} text-muted-foreground group-hover:text-foreground`}>{props.label}</Text>
         {props.trailing}
-        <View class={`${props.open ? "rotate-90" : ""} transition-transform duration-180 motion-reduce:transition-none`}>
+        <View class={`${props.open ? "rotate-90" : ""} ${motionClass.turn}`}>
           <Icon name="chevron-right" size="sm" color="muted-foreground" />
         </View>
       </BaseButton>

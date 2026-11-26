@@ -11,10 +11,9 @@ function recording(): AcpConnectionCallbacks & { diagnostics: string[]; closes: 
   return {
     diagnostics,
     closes,
-    notifications: () => {},
+    notification: () => {},
     diagnostic: (message) => diagnostics.push(message),
     closed: (reason) => closes.push(reason),
-    activity: () => {},
   };
 }
 

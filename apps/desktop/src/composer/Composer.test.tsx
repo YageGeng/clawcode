@@ -1,11 +1,11 @@
 import { expect, open, test } from "nsh/test";
 
+import { DESKTOP } from "../../tests/support/desktop";
+
 /** Opens the composer entry at a desktop size; `modules` stands in for native exports. */
 function openEntry(modules?: Record<string, Record<string, unknown>>) {
   return open("../../tests/entries/session.tsx", {
-    platform: "linux",
-    width: 1200,
-    height: 800,
+    ...DESKTOP,
     ...(modules === undefined ? {} : { modules: modules as never }),
   });
 }

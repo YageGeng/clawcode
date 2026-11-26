@@ -131,27 +131,10 @@ export class SessionRecoveryBuffer {
     this.fullOnly.delete(batch.sessionId);
   }
 
-  /** Returns every complete cursor safe to advertise during Initialize. */
-  cursors(): readonly SessionRecoveryCursor[] {
-    return [...this.committed.values()];
-  }
-
-  /** Discards every incomplete transport group while preserving committed cursors. */
-  discardPending(): void {
-    this.pending.clear();
-  }
-
   /** Discards partial and committed state until a new full replay start arrives. */
   requireFullReplay(sessionId: SessionId): void {
     this.pending.delete(sessionId);
     this.committed.delete(sessionId);
     this.fullOnly.add(sessionId);
-  }
-
-  /** Clears all recovery state for one Session. */
-  reset(sessionId: SessionId): void {
-    this.pending.delete(sessionId);
-    this.committed.delete(sessionId);
-    this.fullOnly.delete(sessionId);
   }
 }

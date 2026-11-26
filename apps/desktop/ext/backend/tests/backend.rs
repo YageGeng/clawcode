@@ -9,35 +9,21 @@ use config::{
 };
 use futures::StreamExt;
 
-/// A configuration with an offline fixture provider whose data lives under `home`.
+/// The app's offline fixture configuration (`tests/fixture/config.toml`) with
+/// its data moved under `home`: a second layer overrides `data_home`.
 fn config_in(home: &tempfile::TempDir) -> ConfigHandle {
-    let path = home.path().join("config.toml");
+    let fixture = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../../tests/fixture/config.toml");
+    let data = home.path().join("data.toml");
     std::fs::write(
-        &path,
+        &data,
         format!(
-            r#"
-active_model = "fixture/model"
-
-[session_persistence]
-data_home = {:?}
-
-[[providers]]
-id = "fixture"
-display_name = "Fixture"
-base_url = "https://example.invalid"
-api_key = "sk-test"
-
-[[providers.models]]
-id = "model"
-display_name = "Fixture Model"
-context_tokens = 32768
-max_output_tokens = 1024
-"#,
+            "[session_persistence]\ndata_home = {:?}\n",
             home.path().join("data")
         ),
     )
     .expect("write config");
-    config::load_from([path]).expect("load config")
+    config::load_from([fixture, data]).expect("load config")
 }
 
 /// An ACP `initialize` request frame with id 1.

@@ -1,14 +1,14 @@
-import { effect, LayoutAnimation, reduceMotion, signal, Text, View } from "nsh";
+import { effect, signal, Text, View } from "nsh";
 import { t } from "nsh/i18n";
 
-import type { SessionId } from "../client/acp/protocol";
 import { Composer } from "../composer/Composer";
 import { ContextStrip } from "../composer/ContextStrip";
 import { SessionView } from "../session/SessionView";
 import { SettingsDialog } from "../settings/SettingsDialog";
 import type { AppStore } from "../stores/app";
+import type { HostFailure, HostPhase } from "../stores/host";
 import type { SettingsStore } from "../stores/settings";
-import { motion } from "../ui/motion";
+import { glideNextLayout } from "../ui/motion";
 import { Toasts, ToastStore } from "../ui/toast";
 import { type } from "../ui/tokens";
 import { EmptyState } from "./EmptyState";
@@ -24,22 +24,27 @@ export function Shell(props: { store: AppStore; settings: SettingsStore }) {
   const chosenCwd = signal<string | null>(null);
   const cwd = () => chosenCwd() ?? groupByWorkspace(props.store.currentHost().sessions())[0]?.cwd ?? null;
   const host = () => props.store.currentHost();
-  const openSessionId = () => props.store.location().sessionId as SessionId | null;
+  const openSessionId = () => props.store.location().sessionId;
+  /** Why the host is not ready in `kind`, in the interface language; `undefined` in any other phase. */
+  const failureText = (kind: "failed" | "offline") => {
+    const phase = host().phase();
+    if (phase.kind !== kind) return undefined;
+    const failure: HostFailure = (phase as Extract<HostPhase, { failure: HostFailure }>).failure;
+    return t(`host.failure.${failure.cause}`, { detail: failure.detail });
+  };
 
-  // The host's notices (a prompt that was not sent) show as toasts, each once.
+  // The host's notices (a prompt that was not sent) show as toasts; each leaves the host once shown.
   const toasts = new ToastStore();
-  const shown = new Set<string>();
   effect(() => {
-    for (const notice of host().workspace().notices) {
-      if (shown.has(notice.id)) continue;
-      shown.add(notice.id);
+    for (const notice of host().notices()) {
       toasts.show({ title: notice.title, description: notice.description, tone: "danger" });
+      host().dismissNotice(notice.id);
     }
   });
 
   /** Shows or hides the sidebar, gliding the layout unless the user asked for less motion. */
   const toggleSidebar = () => {
-    if (!reduceMotion()) LayoutAnimation.configureNext(LayoutAnimation.create(motion.base, "easeInEaseOut", "opacity"));
+    glideNextLayout();
     sidebarOpen.update((open) => !open);
   };
 
@@ -56,7 +61,7 @@ export function Shell(props: { store: AppStore; settings: SettingsStore }) {
               <Text class={`${type.ui} text-muted-foreground`}>{t("shell.starting")}</Text>
             </View>
           </If>
-          <If when={host().phase().kind === "failed" ? (host().phase() as { reason: string }).reason : undefined}>
+          <If when={failureText("failed")}>
             {(reason) => (
               <View class="flex-1 items-center justify-center px-6">
                 <Text class={`${type.ui} text-destructive text-center`}>{reason()}</Text>
@@ -64,7 +69,7 @@ export function Shell(props: { store: AppStore; settings: SettingsStore }) {
             )}
           </If>
           {/* Lost after it was ready: say why above the Sessions, which stay on screen (a resend fails into a notice). */}
-          <If when={host().phase().kind === "offline" ? (host().phase() as { reason: string }).reason : undefined}>
+          <If when={failureText("offline")}>
             {(reason) => (
               <View role="alert" class="border-b border-border px-6 py-2">
                 <Text class={`${type.ui} text-destructive`}>{reason()}</Text>
@@ -93,7 +98,7 @@ export function Shell(props: { store: AppStore; settings: SettingsStore }) {
             >
               {/* Keyed by host and Session: `If` keeps its branch while it stays truthy, so without the key one view
                   (its draft, scroll anchor and jump state) would carry over into the next Session. */}
-              <Each of={[openSessionId() as SessionId]} key={(id) => `${host().info.id}\n${id}`}>
+              <Each of={[openSessionId()!]} key={(id) => `${host().info.id}\n${id}`}>
                 {(sessionId) => <SessionView host={host()} sessionId={sessionId()} />}
               </Each>
             </If>

@@ -1,7 +1,7 @@
 import { Text, View } from "nsh";
 import { t } from "nsh/i18n";
 
-import type { FileChange } from "../client/turns";
+import type { FileChange } from "../client/domain/model";
 import { workspaceName } from "../shell/workspaces";
 import { Icon } from "../ui/icon";
 import { LineCounts, Surface } from "../ui/surface";

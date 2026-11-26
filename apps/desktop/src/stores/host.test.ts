@@ -20,7 +20,7 @@ test("host_lists_sessions_after_start", async () => {
 test("host_reports_a_transport_that_cannot_open", async () => {
   const host = createHostStore(LOCAL_HOST, new MemoryTransport(() => {}, "config file not found"));
   await host.start();
-  expect(host.phase()).toEqual({ kind: "failed", reason: "Backend failed to start: config file not found" });
+  expect(host.phase()).toEqual({ kind: "failed", failure: { cause: "start", detail: "config file not found" } });
 });
 
 test("starting_twice_keeps_a_ready_host", async () => {
@@ -35,5 +35,5 @@ test("host_times_out_when_backend_never_answers", async () => {
   await host.start();
   const phase = host.phase();
   expect(phase.kind).toBe("failed");
-  expect(phase.kind === "failed" && phase.reason.startsWith("Backend did not answer:")).toBe(true);
+  expect(phase.kind === "failed" && phase.failure.cause).toBe("unanswered");
 });

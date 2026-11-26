@@ -66,7 +66,7 @@ export function Button(props: ButtonBaseProps & { label: string; icon?: IconName
       class={`${shell} rounded-(--radius) ${motionClass.wash} ${motionClass.press} ${surface[variant()]} ${sizing[size()]} ${props.class ?? ""}`}
     >
       <If when={props.loading === true}>
-        <Icon name="loader-circle" size="sm" color={ink[variant()].icon} class="animate-spin motion-reduce:animate-none" />
+        <Icon name="loader-circle" size="sm" color={ink[variant()].icon} class={motionClass.spin} />
       </If>
       <If when={props.loading !== true && props.icon !== undefined}>
         <Icon name={props.icon ?? "plus"} size="sm" color={ink[variant()].icon} />
@@ -99,7 +99,7 @@ export function IconButton(props: ButtonBaseProps & { icon: IconName; label: str
         name={props.loading === true ? "loader-circle" : props.icon}
         size={size() === "sm" ? "sm" : "md"}
         color={ink[variant()].icon}
-        class={props.loading === true ? "animate-spin motion-reduce:animate-none" : undefined}
+        class={props.loading === true ? motionClass.spin : undefined}
       />
     </BaseButton>
   );

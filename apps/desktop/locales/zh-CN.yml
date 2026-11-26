@@ -14,6 +14,11 @@ appearance:
   dark: 深色
 language:
   system: 跟随系统
+host:
+  failure:
+    start: "后端未能启动：%{detail}"
+    unanswered: "后端没有响应：%{detail}"
+    stopped: "后端已停止：%{detail}"
 notice:
   promptFailed: 消息未发送
 shell:

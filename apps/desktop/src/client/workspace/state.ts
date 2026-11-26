@@ -1,98 +1,51 @@
 import type { SessionId } from "../acp/protocol";
-import type { ElicitationPrompt, PermissionPrompt, PromptInput, SessionNotice, SessionSummary } from "../domain/model";
-import {
-  initialSessionWorkspaceState,
-  reduceSessionWorkspace
-} from "./sessionState";
+import type { PermissionPrompt, SessionNotice, SessionSummary } from "../domain/model";
+import { initialSessionWorkspaceState, reduceSessionWorkspace } from "./sessionState";
 import type { SessionWorkspaceAction, SessionWorkspaceState } from "./sessionState";
 
-export type ConnectionState =
-  | { readonly type: "disconnected" }
-  | { readonly type: "connecting"; readonly attempt: number }
-  | { readonly type: "initializing" }
-  | { readonly type: "ready" }
-  | { readonly type: "reconnecting"; readonly attempt: number }
-  | { readonly type: "failed"; readonly message: string };
-
+/** Everything one host's Sessions show. */
 export type WorkspaceState = Readonly<{
-  connection: ConnectionState;
   sessions: readonly SessionSummary[];
-  activeSessionId: SessionId | undefined;
+  /** Projections of the Sessions opened on this connection. */
   sessionWorkspaces: ReadonlyMap<SessionId, SessionWorkspaceState>;
-  runningSessionIds: ReadonlySet<SessionId>;
-  drafts: ReadonlyMap<SessionId, PromptInput>;
-  composerRevision: number;
-  diagnostics: readonly string[];
+  /** Notices not yet shown as toasts. */
   notices: readonly SessionNotice[];
-  elicitations: readonly ElicitationPrompt[];
   permissions: readonly PermissionPrompt[];
 }>;
 
 export type WorkspaceAction =
   | { readonly type: "workspace/committed"; readonly state: WorkspaceState }
-  | { readonly type: "connection/changed"; readonly connection: ConnectionState }
   | { readonly type: "session/listed"; readonly sessions: readonly SessionSummary[] }
-  | { readonly type: "session/activated"; readonly sessionId: SessionId }
-  | { readonly type: "session/deactivated" }
   | { readonly type: "session/title"; readonly sessionId: SessionId; readonly title: string }
   | { readonly type: "session/updated"; readonly sessionId: SessionId; readonly action: SessionWorkspaceAction }
-  | { readonly type: "draft/activated"; readonly sessionId: SessionId; readonly draft: PromptInput }
-  | { readonly type: "draft/changed"; readonly sessionId: SessionId; readonly draft: PromptInput }
-  | { readonly type: "draft/cleared"; readonly sessionId: SessionId }
-  | { readonly type: "diagnostic/added"; readonly message: string }
+  /** The connection ended: nothing finishes a turn on it, so no Session runs any more. */
+  | { readonly type: "sessions/stopped" }
   | { readonly type: "notice/added"; readonly notice: SessionNotice }
   | { readonly type: "notice/dismissed"; readonly id: string }
-  | { readonly type: "elicitation/asked"; readonly prompt: ElicitationPrompt }
-  | { readonly type: "elicitation/settled"; readonly key: string }
   | { readonly type: "permission/asked"; readonly prompt: PermissionPrompt }
   | { readonly type: "permission/settled"; readonly key: string };
 
 export const initialWorkspaceState: WorkspaceState = {
-  connection: { type: "disconnected" },
   sessions: [],
-  activeSessionId: undefined,
   sessionWorkspaces: new Map(),
-  runningSessionIds: new Set(),
-  drafts: new Map(),
-  composerRevision: 0,
-  diagnostics: [],
   notices: [],
-  elicitations: [],
   permissions: []
 };
 
 /** Returns the current projection for one Session, or a shared empty projection before loading. */
-export function sessionWorkspace(
-  state: WorkspaceState,
-  sessionId: SessionId
-): SessionWorkspaceState {
+export function sessionWorkspace(state: WorkspaceState, sessionId: SessionId): SessionWorkspaceState {
   return state.sessionWorkspaces.get(sessionId) ?? initialSessionWorkspaceState;
 }
 
 /** Applies global actions and delegates Session actions to their isolated projection. */
-export function reduceWorkspace(
-  state: WorkspaceState,
-  action: WorkspaceAction
-): WorkspaceState {
+export function reduceWorkspace(state: WorkspaceState, action: WorkspaceAction): WorkspaceState {
   switch (action.type) {
     // SessionUpdateRouter has already reduced an entire transport frame against
     // one local projection, so install that result without replaying its actions.
     case "workspace/committed": return action.state;
-    case "connection/changed": return { ...state, connection: action.connection };
     case "session/listed": {
       const sessionIds = new Set(action.sessions.map((session) => session.sessionId));
-      const sessionWorkspaces = new Map(
-        [...state.sessionWorkspaces].filter(([sessionId]) => sessionIds.has(sessionId))
-      );
-      const drafts = new Map(
-        [...state.drafts].filter(([sessionId]) => sessionIds.has(sessionId))
-      );
-      const runningSessionIds = new Set(
-        [...state.runningSessionIds].filter((sessionId) => sessionIds.has(sessionId))
-      );
-      const activeSessionId = state.activeSessionId !== undefined && sessionIds.has(state.activeSessionId)
-        ? state.activeSessionId
-        : undefined;
+      const sessionWorkspaces = new Map([...state.sessionWorkspaces].filter(([sessionId]) => sessionIds.has(sessionId)));
       // The backend lists Sessions in directory order; creation order keeps
       // children in spawn order and appends new ones instead of reshuffling.
       const sessions = [...action.sessions].sort((left, right) => {
@@ -100,57 +53,27 @@ export function reduceWorkspace(
         const rightTime = BigInt(right.createdAtMs ?? 0);
         return leftTime === rightTime ? 0 : leftTime < rightTime ? -1 : 1;
       });
-      return { ...state, sessions, activeSessionId, sessionWorkspaces, runningSessionIds, drafts };
+      return { ...state, sessions, sessionWorkspaces };
     }
-    case "session/activated": {
-      if (state.sessionWorkspaces.has(action.sessionId)) {
-        return { ...state, activeSessionId: action.sessionId };
-      }
-      const sessionWorkspaces = new Map(state.sessionWorkspaces);
-      sessionWorkspaces.set(action.sessionId, initialSessionWorkspaceState);
-      return { ...state, activeSessionId: action.sessionId, sessionWorkspaces };
-    }
-    case "session/deactivated": return { ...state, activeSessionId: undefined };
     case "session/title": return {
       ...state,
       sessions: state.sessions.map((session) => session.sessionId === action.sessionId ? { ...session, title: action.title } : session)
     };
     case "session/updated": {
-      const sessionWorkspaces = new Map(state.sessionWorkspaces);
       const previous = sessionWorkspace(state, action.sessionId);
       const next = reduceSessionWorkspace(previous, action.action);
-      sessionWorkspaces.set(
-        action.sessionId,
-        next
-      );
-      if (previous.running === next.running) return { ...state, sessionWorkspaces };
-      const runningSessionIds = new Set(state.runningSessionIds);
-      if (next.running) runningSessionIds.add(action.sessionId);
-      else runningSessionIds.delete(action.sessionId);
-      return { ...state, sessionWorkspaces, runningSessionIds };
+      if (next === previous) return state;
+      return { ...state, sessionWorkspaces: new Map(state.sessionWorkspaces).set(action.sessionId, next) };
     }
-    case "draft/activated": {
-      const drafts = new Map(state.drafts);
-      drafts.set(action.sessionId, action.draft);
-      return { ...state, drafts, composerRevision: state.composerRevision + 1 };
+    case "sessions/stopped": {
+      const running = [...state.sessionWorkspaces].filter(([, session]) => session.running);
+      if (running.length === 0) return state;
+      const sessionWorkspaces = new Map(state.sessionWorkspaces);
+      for (const [sessionId, session] of running) sessionWorkspaces.set(sessionId, { ...session, running: false });
+      return { ...state, sessionWorkspaces };
     }
-    case "draft/changed": {
-      const drafts = new Map(state.drafts);
-      drafts.set(action.sessionId, action.draft);
-      return { ...state, drafts };
-    }
-    case "draft/cleared": {
-      const drafts = new Map(state.drafts);
-      drafts.delete(action.sessionId);
-      return { ...state, drafts };
-    }
-    case "diagnostic/added": return { ...state, diagnostics: [...state.diagnostics, action.message] };
-    // At most three toasts stay on screen; the oldest yields to a new one.
-    case "notice/added": return { ...state, notices: [...state.notices, action.notice].slice(-3) };
+    case "notice/added": return { ...state, notices: [...state.notices, action.notice] };
     case "notice/dismissed": return { ...state, notices: state.notices.filter((notice) => notice.id !== action.id) };
-    // Requests queue and the dialog shows the oldest one.
-    case "elicitation/asked": return { ...state, elicitations: [...state.elicitations, action.prompt] };
-    case "elicitation/settled": return { ...state, elicitations: state.elicitations.filter((prompt) => prompt.key !== action.key) };
     case "permission/asked": return { ...state, permissions: [...state.permissions, action.prompt] };
     case "permission/settled": return { ...state, permissions: state.permissions.filter((prompt) => prompt.key !== action.key) };
   }
