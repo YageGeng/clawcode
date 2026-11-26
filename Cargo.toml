@@ -1,9 +1,9 @@
 [workspace]
 members = [
+  "apps/desktop/ext/backend",
   "crates/acp",
   "crates/app",
   "crates/config",
-  "crates/desktop",
   "crates/extension",
   "crates/kernel",
   "crates/mcp",
@@ -141,9 +141,8 @@ agent-client-protocol = "5"
 agent-client-protocol-http = { version = "5", default-features = false }
 
 # gui
-gpui-kit = "0.11"
-rust-i18n = "4"
-sys-locale = "0.3"
+# Native Shell crates stay at the version of the installed `nsh` CLI.
+nsh-core = "0.6.1"
 
 # cli
 clap = { version = "4", features = ["derive"] }

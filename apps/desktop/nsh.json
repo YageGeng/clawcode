@@ -1,0 +1,20 @@
+{
+  "name": "Clawcode",
+  "id": "com.clawcode.desktop",
+  "version": "0.1.0",
+  "build": 1,
+  "rust": "ext/backend",
+  "theme": "theme.json",
+  "appearance": "system",
+  "window": {
+    "title": "Clawcode",
+    "defaultSize": { "width": 1200, "height": 800 },
+    "minSize": { "width": 800, "height": 560 },
+    "restoreBounds": true
+  },
+  "capabilities": {
+    "process": {
+      "env": ["CLAW_CONFIG"]
+    }
+  }
+}

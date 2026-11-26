@@ -1,0 +1,61 @@
+common:
+  close: 关闭
+  dismiss: 关闭通知
+  copy: 复制
+  copied: 已复制
+  cancel: 取消
+settings:
+  title: 设置
+  appearance: 外观
+  language: 语言
+appearance:
+  system: 跟随系统
+  light: 浅色
+  dark: 深色
+language:
+  system: 跟随系统
+notice:
+  promptFailed: 消息未发送
+shell:
+  newSession: 新会话
+  workspaces: 工作区
+  recent: 最近
+  settings: 设置
+  back: 后退
+  forward: 前进
+  toggleSidebar: 显示或隐藏侧栏
+  workspace: 工作区
+  hosts: 电脑
+  thisComputer: 这台电脑
+  starting: 正在启动
+session:
+  running: 运行中
+  needsAttention: 等待你批准
+  jumpToBottom: 回到底部
+empty:
+  heading: 要在
+  headingAfter: 里做什么？
+  chooseFolder: 选择文件夹…
+turn:
+  workedFor: 用时 %{duration}
+  working: 正在工作
+time:
+  seconds: "%{s} 秒"
+  minutesSeconds: "%{m} 分 %{s} 秒"
+tools:
+  ran: 运行了命令
+  edited: 编辑了文件
+  read: 读取了文件
+  searched: 搜索了内容
+  fetched: 获取了网页
+  other: 使用了工具
+  separator: "、"
+changes:
+  edited: 已编辑 %{file}
+composer:
+  label: 消息
+  placeholder: 有问题，尽管问
+  send: 发送
+  stop: 停止
+  attach: 添加附件
+  attachSoon: 附件功能即将推出

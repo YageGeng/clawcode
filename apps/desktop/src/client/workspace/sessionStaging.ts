@@ -1,0 +1,396 @@
+import type { ConfigSelect, EntryId, MessageId, RunId, TurnId } from "../acp/protocol";
+import type { TerminalEntity } from "./terminals";
+import type {
+  AgentRunUsage,
+  CacheTrail,
+  BranchSummaryEntity,
+  CompactionEntity,
+  CompactionStatus,
+  ContextUsage,
+  ExtensionEntity,
+  McpSessionSnapshot,
+  MessageEntity,
+  PendingMessages,
+  RetryStatus,
+  SessionEvent,
+  SessionPlans,
+  SessionTree,
+  SkillListResult,
+  ToolCallEntity,
+  TranscriptEntry
+} from "../domain/model";
+import { AgentRunUsages, CacheMisses, EventOrdering as Ordering, Questions } from "../domain/model";
+import { EventSequenceRanges, initialSessionWorkspaceState, retainEvents } from "./sessionState";
+import type { SessionWorkspaceAction, SessionWorkspaceState } from "./sessionState";
+
+/** Retains an immutable Map until one frame action first requests a mutable view. */
+class MapDraft<K, V> {
+  private readonly base: ReadonlyMap<K, V>;
+  private mutable: Map<K, V> | undefined;
+
+  /** Creates a lazy frame-local Map backed by the current immutable projection. */
+  constructor(base: ReadonlyMap<K, V>) {
+    this.base = base;
+  }
+
+  /** Returns the current read view without forcing a collection copy. */
+  read(): ReadonlyMap<K, V> {
+    return this.mutable ?? this.base;
+  }
+
+  /** Returns a mutable frame view, copying the base collection at most once. */
+  write(): Map<K, V> {
+    this.mutable ??= new Map(this.base);
+    return this.mutable;
+  }
+
+  /** Replaces the frame view after actions that reset an entire collection. */
+  replace(value: Map<K, V>): void {
+    this.mutable = value;
+  }
+}
+
+/** Applies one transport frame to a Session with copy-on-write collections. */
+export class SessionWorkspaceStager {
+  private readonly messages: MapDraft<MessageId, MessageEntity>;
+  private readonly tools: MapDraft<string, ToolCallEntity>;
+  private readonly terminals: MapDraft<string, TerminalEntity>;
+  private readonly extensions: MapDraft<string, ExtensionEntity>;
+  private readonly compactions: MapDraft<EntryId, CompactionEntity>;
+  private readonly branchSummaries: MapDraft<MessageId, BranchSummaryEntity>;
+  private readonly turnRuns: MapDraft<TurnId, RunId>;
+  private readonly runUsages: MapDraft<RunId, AgentRunUsage>;
+  private cacheTrail: CacheTrail;
+  private transcript: readonly TranscriptEntry[];
+  private appendedTranscript: TranscriptEntry[] = [];
+  private events: readonly SessionEvent[];
+  private appendedEvents: SessionEvent[] = [];
+  private diagnostics: readonly string[];
+  private appendedDiagnostics: string[] = [];
+  private pending: PendingMessages;
+  private tree: SessionTree | undefined;
+  private skills: SkillListResult["skills"];
+  private skillDiagnostics: SkillListResult["diagnostics"];
+  private availableCommands: SessionWorkspaceState["availableCommands"];
+  private mcpSnapshot: McpSessionSnapshot;
+  private running: boolean;
+  private contextUsage: ContextUsage | undefined;
+  private configOptions: readonly ConfigSelect[];
+  private plans: SessionPlans;
+  private retry: RetryStatus | undefined;
+  private compaction: CompactionStatus;
+  private outcomeUnknown: boolean;
+  private settlingQuestions: ReadonlySet<string>;
+
+  /** Creates one frame-local draft while preserving untouched collection identities. */
+  constructor(base: SessionWorkspaceState) {
+    this.messages = new MapDraft(base.messages);
+    this.tools = new MapDraft(base.tools);
+    this.terminals = new MapDraft(base.terminals);
+    this.extensions = new MapDraft(base.extensions);
+    this.compactions = new MapDraft(base.compactions);
+    this.branchSummaries = new MapDraft(base.branchSummaries);
+    this.turnRuns = new MapDraft(base.turnRuns);
+    this.runUsages = new MapDraft(base.runUsages);
+    this.cacheTrail = base.cacheTrail;
+    this.transcript = base.transcript;
+    this.events = base.events;
+    this.diagnostics = base.diagnostics;
+    this.pending = base.pending;
+    this.tree = base.tree;
+    this.skills = base.skills;
+    this.skillDiagnostics = base.skillDiagnostics;
+    this.availableCommands = base.availableCommands;
+    this.mcpSnapshot = base.mcpSnapshot;
+    this.running = base.running;
+    this.contextUsage = base.contextUsage;
+    this.configOptions = base.configOptions;
+    this.plans = base.plans;
+    this.retry = base.retry;
+    this.compaction = base.compaction;
+    this.outcomeUnknown = base.outcomeUnknown;
+    this.settlingQuestions = base.settlingQuestions;
+  }
+
+  /** Applies one Session action using copy-on-write collections. */
+  apply(action: SessionWorkspaceAction): void {
+    switch (action.type) {
+      case "transcript/cleared": {
+        // Clearing stale entities must not hide a disconnected Run whose final
+        // outcome is still unknown until a successful replay completes.
+        const outcomeUnknown = this.outcomeUnknown;
+        this.messages.replace(new Map());
+        this.tools.replace(new Map());
+        this.terminals.replace(new Map());
+        this.extensions.replace(new Map());
+        this.compactions.replace(new Map());
+        this.branchSummaries.replace(new Map());
+        this.turnRuns.replace(new Map());
+        this.runUsages.replace(new Map());
+        this.cacheTrail = CacheMisses.empty;
+        this.transcript = [];
+        this.appendedTranscript = [];
+        this.events = [];
+        this.appendedEvents = [];
+        this.diagnostics = [];
+        this.appendedDiagnostics = [];
+        this.pending = initialSessionWorkspaceState.pending;
+        this.tree = undefined;
+        this.skills = initialSessionWorkspaceState.skills;
+        this.skillDiagnostics = initialSessionWorkspaceState.skillDiagnostics;
+        this.availableCommands = initialSessionWorkspaceState.availableCommands;
+        this.configOptions = initialSessionWorkspaceState.configOptions;
+        this.plans = initialSessionWorkspaceState.plans;
+        this.mcpSnapshot = initialSessionWorkspaceState.mcpSnapshot;
+        this.running = false;
+        this.contextUsage = undefined;
+        this.retry = undefined;
+        this.compaction = initialSessionWorkspaceState.compaction;
+        this.outcomeUnknown = outcomeUnknown;
+        return;
+      }
+      case "message/upserted": {
+        const previous = this.messages.read().get(action.message.messageId);
+        this.messages.write().set(action.message.messageId, {
+          ...action.message,
+          sequenceRange: EventSequenceRanges.include(previous?.sequenceRange, action.order.sequence)
+        });
+        if (previous === undefined) {
+          this.appendedTranscript.push({ type: "message", messageId: action.message.messageId, order: action.order });
+        }
+        return;
+      }
+      case "message/text-delta":
+      case "message/reasoning-delta": {
+        const previous = this.messages.read().get(action.messageId);
+        const base: MessageEntity = previous ?? {
+          messageId: action.messageId,
+          turnId: action.meta.turnId,
+          role: action.type === "message/text-delta" ? action.role : "assistant",
+          text: "",
+          images: [],
+          reasoning: "",
+          timestampMs: action.meta.timestampMs,
+          startedAtMs: action.meta.timestampMs,
+          endedAtMs: action.meta.timestampMs,
+          streaming: true
+        };
+        const sequenceRange = EventSequenceRanges.include(base.sequenceRange, action.order.sequence);
+        this.messages.write().set(action.messageId, action.type === "message/text-delta"
+          ? { ...base, text: base.text + action.delta, endedAtMs: action.meta.timestampMs, streaming: true, sequenceRange }
+          : { ...base, reasoning: base.reasoning + action.delta, endedAtMs: action.meta.timestampMs, streaming: true, sequenceRange });
+        if (previous === undefined) {
+          this.appendedTranscript.push({ type: "message", messageId: action.messageId, order: action.order });
+        }
+        return;
+      }
+      case "tool/upserted": {
+        const previous = this.tools.read().get(action.tool.toolCallId);
+        this.tools.write().set(action.tool.toolCallId, {
+          ...action.tool,
+          sequenceRange: EventSequenceRanges.include(previous?.sequenceRange, action.order.sequence)
+        });
+        if (previous === undefined) {
+          this.appendedTranscript.push({ type: "tool", toolCallId: action.tool.toolCallId, order: action.order });
+        }
+        return;
+      }
+      case "terminal/upserted":
+        this.terminals.write().set(action.terminal.terminalId, action.terminal);
+        return;
+      case "extension/upserted": {
+        const exists = this.extensions.read().has(action.extension.id);
+        this.extensions.write().set(action.extension.id, action.extension);
+        if (!exists) {
+          this.appendedTranscript.push({ type: "extension", extensionEventId: action.extension.id, order: action.order });
+        }
+        // Mirrors the reducer: a visible settlement ends this tab's own hiding.
+        this.settlingQuestions = Questions.settled(this.settlingQuestions, action.extension);
+        return;
+      }
+      case "compaction/upserted": {
+        const exists = this.compactions.read().has(action.compaction.entryId);
+        this.compactions.write().set(action.compaction.entryId, action.compaction);
+        if (!exists) {
+          this.appendedTranscript.push({ type: "compaction", entryId: action.compaction.entryId, order: action.order });
+        }
+        return;
+      }
+      case "branch-summary/upserted": {
+        const exists = this.branchSummaries.read().has(action.branchSummary.messageId);
+        this.branchSummaries.write().set(action.branchSummary.messageId, action.branchSummary);
+        if (!exists) {
+          this.appendedTranscript.push({ type: "branchSummary", messageId: action.branchSummary.messageId, order: action.order });
+        }
+        return;
+      }
+      case "turn/settled": {
+        if (this.turnRuns.read().has(action.turnId)) return;
+        const turnMessages = [...this.messages.read().values()].filter((message) => message.turnId === action.turnId);
+        const assistants = turnMessages.flatMap((message) => message.assistant === undefined ? [] : [message.assistant]);
+        this.turnRuns.write().set(action.turnId, action.runId);
+        if (assistants.length === 0) return;
+        // Usage is final once the Turn settles, so cache misses are judged exactly once here.
+        this.cacheTrail = CacheMisses.settleTurn(this.cacheTrail, turnMessages);
+        // The frame-local accumulator deduplicates TurnEnd and avoids scanning
+        // every message again when the complete Agent Run later settles.
+        this.runUsages.write().set(action.runId, AgentRunUsages.settleTurn(this.runUsages.read().get(action.runId), assistants));
+        return;
+      }
+      case "run/settled": {
+        // Mirrors the reducer: plans collapse, but stay, when their Run ends.
+        if (this.plans.settled === false) this.plans = { ...this.plans, settled: true };
+        const previous = this.runUsages.read().get(action.runId);
+        if (previous === undefined || previous.settled) return;
+        this.runUsages.write().set(action.runId, { ...previous, settled: true });
+        this.appendedTranscript.push({ type: "agent_usage", runId: action.runId, order: action.order });
+        return;
+      }
+      case "recovery/completed": {
+        const exists = this.transcript.some((entry) => entry.type === "recovery"
+          && entry.notice.recoveryId === action.notice.recoveryId)
+          || this.appendedTranscript.some((entry) => entry.type === "recovery"
+            && entry.notice.recoveryId === action.notice.recoveryId);
+        if (!exists) {
+          this.appendedTranscript.push({ type: "recovery", notice: action.notice, order: action.order });
+        }
+        return;
+      }
+      case "event/received": {
+        this.appendedEvents.push(action.event);
+        return;
+      }
+      case "queue/replaced": {
+        this.pending = {
+          steering: action.pending.steering.filter((item) => {
+            const messageId = item.message.message_id;
+            return typeof messageId !== "string" || this.messages.read().get(messageId as MessageId)?.role !== "user";
+          }),
+          followUp: action.pending.followUp.filter((item) => {
+            const messageId = item.message.message_id;
+            return typeof messageId !== "string" || this.messages.read().get(messageId as MessageId)?.role !== "user";
+          })
+        };
+        return;
+      }
+      case "queue/removed": {
+        this.pending = {
+          steering: this.pending.steering.filter((item) => item.queueId !== action.queueId),
+          followUp: this.pending.followUp.filter((item) => item.queueId !== action.queueId)
+        };
+        return;
+      }
+      case "tree/replaced": this.tree = action.tree; return;
+      case "skills/replaced": this.skills = action.result.skills; this.skillDiagnostics = action.result.diagnostics; return;
+      case "commands/replaced": this.availableCommands = action.commands; return;
+      case "mcp/replaced":
+        if (action.snapshot.revision >= this.mcpSnapshot.revision) this.mcpSnapshot = action.snapshot;
+        return;
+      case "running/changed":
+        if (action.running) {
+          this.running = true;
+        } else {
+          this.running = false;
+          if (this.retry?.type === "finished") this.retry = undefined;
+          if (this.compaction.type === "running") this.compaction = { type: "idle" };
+          // Mirrors the reducer: an idle server holds no skip.
+          this.settlingQuestions = initialSessionWorkspaceState.settlingQuestions;
+        }
+        return;
+      case "usage/changed": this.contextUsage = action.usage; return;
+      case "config/replaced": this.configOptions = action.options; return;
+      // Mirrors the reducer: new plan content reopens the panel.
+      case "plans/todos": this.plans = { ...this.plans, todos: action.todos, settled: false }; return;
+      case "plans/approved": this.plans = { ...this.plans, approvedPlan: action.plan, settled: false }; return;
+      case "retry/changed": this.retry = action.retry; return;
+      case "compaction/changed": this.compaction = action.compaction; return;
+      case "outcome/unknown": this.outcomeUnknown = action.value; return;
+      case "diagnostic/added": this.appendedDiagnostics.push(action.message); return;
+      // Mirrors the reducer; a staged replay keeps this tab's settlements.
+      case "questions/settling": {
+        const settling = new Set(this.settlingQuestions);
+        for (const id of action.ids) {
+          if (action.settling) settling.add(id);
+          else settling.delete(id);
+        }
+        this.settlingQuestions = settling;
+        return;
+      }
+    }
+  }
+
+  /** Cheap read view for the decoder, which only queries messages, pending, and tools. */
+  snapshot(): SessionWorkspaceState {
+    // transcript/events/diagnostics are ignored by the decoder, so pass the
+    // base arrays by reference without copying or sorting on every item.
+    return {
+      messages: this.messages.read(),
+      transcript: this.transcript,
+      tools: this.tools.read(),
+      terminals: this.terminals.read(),
+      extensions: this.extensions.read(),
+      compactions: this.compactions.read(),
+      branchSummaries: this.branchSummaries.read(),
+      turnRuns: this.turnRuns.read(),
+      runUsages: this.runUsages.read(),
+      cacheTrail: this.cacheTrail,
+      events: this.events,
+      pending: this.pending,
+      tree: this.tree,
+      skills: this.skills,
+      skillDiagnostics: this.skillDiagnostics,
+      availableCommands: this.availableCommands,
+      mcpSnapshot: this.mcpSnapshot,
+      running: this.running,
+      contextUsage: this.contextUsage,
+      configOptions: this.configOptions,
+      plans: this.plans,
+      retry: this.retry,
+      compaction: this.compaction,
+      outcomeUnknown: this.outcomeUnknown,
+      diagnostics: this.diagnostics,
+      settlingQuestions: this.settlingQuestions
+    };
+  }
+
+  /** Freezes the staged projection and returns the immutable Session state. */
+  commit(): SessionWorkspaceState {
+    const transcript = this.appendedTranscript.length === 0
+      ? this.transcript
+      : [...this.transcript, ...this.appendedTranscript].sort((left, right) => Ordering.compare(left.order, right.order));
+    const events = this.appendedEvents.length === 0
+      ? this.events
+      : retainEvents([...this.events, ...this.appendedEvents]);
+    return {
+      messages: this.messages.read(),
+      transcript,
+      tools: this.tools.read(),
+      terminals: this.terminals.read(),
+      extensions: this.extensions.read(),
+      compactions: this.compactions.read(),
+      branchSummaries: this.branchSummaries.read(),
+      turnRuns: this.turnRuns.read(),
+      runUsages: this.runUsages.read(),
+      cacheTrail: this.cacheTrail,
+      events,
+      pending: this.pending,
+      tree: this.tree,
+      skills: this.skills,
+      skillDiagnostics: this.skillDiagnostics,
+      availableCommands: this.availableCommands,
+      mcpSnapshot: this.mcpSnapshot,
+      running: this.running,
+      contextUsage: this.contextUsage,
+      configOptions: this.configOptions,
+      plans: this.plans,
+      retry: this.retry,
+      compaction: this.compaction,
+      outcomeUnknown: this.outcomeUnknown,
+      diagnostics: this.appendedDiagnostics.length === 0
+        ? this.diagnostics
+        : [...this.diagnostics, ...this.appendedDiagnostics],
+      settlingQuestions: this.settlingQuestions
+    };
+  }
+
+}

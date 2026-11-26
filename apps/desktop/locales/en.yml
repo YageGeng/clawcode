@@ -1,0 +1,61 @@
+common:
+  close: Close
+  dismiss: Dismiss
+  copy: Copy
+  copied: Copied
+  cancel: Cancel
+settings:
+  title: Settings
+  appearance: Appearance
+  language: Language
+appearance:
+  system: Match system
+  light: Light
+  dark: Dark
+language:
+  system: Match system
+notice:
+  promptFailed: The message was not sent
+shell:
+  newSession: New session
+  workspaces: Workspaces
+  recent: Recent
+  settings: Settings
+  back: Back
+  forward: Forward
+  toggleSidebar: Toggle sidebar
+  workspace: Workspace
+  hosts: Computers
+  thisComputer: This computer
+  starting: Starting
+session:
+  running: Running
+  needsAttention: Needs your approval
+  jumpToBottom: Jump to bottom
+empty:
+  heading: What should we build in
+  headingAfter: "?"
+  chooseFolder: Choose folder…
+turn:
+  workedFor: Worked for %{duration}
+  working: Working
+time:
+  seconds: "%{s}s"
+  minutesSeconds: "%{m}m %{s}s"
+tools:
+  ran: Ran commands
+  edited: Edited files
+  read: Read files
+  searched: Searched
+  fetched: Fetched pages
+  other: Used tools
+  separator: ", "
+changes:
+  edited: Edited %{file}
+composer:
+  label: Message
+  placeholder: Ask anything
+  send: Send
+  stop: Stop
+  attach: Attach files
+  attachSoon: Attachments are coming soon

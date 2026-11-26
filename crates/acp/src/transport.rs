@@ -1,7 +1,7 @@
 use std::num::NonZeroUsize;
 use std::sync::Arc;
 
-use agent_client_protocol::{ConnectTo, Stdio};
+use agent_client_protocol::{ConnectTo, Lines, Stdio};
 use agent_client_protocol_http::{AcpHttpServer, CorsOptions, ServerOptions};
 use axum::Router;
 use kernel::Kernel;
@@ -37,8 +37,8 @@ pub enum AcpTransportError {
     /// An allowed browser origin was not a valid HTTP header value.
     #[error("invalid ACP browser origin: {0}")]
     InvalidOrigin(String),
-    /// The ACP stdio connection terminated with a protocol error.
-    #[error("ACP stdio transport failed: {0}")]
+    /// An ACP stdio or in-process line connection terminated with a protocol error.
+    #[error("ACP transport failed: {0}")]
     Protocol(#[from] agent_client_protocol::Error),
 }
 
@@ -47,6 +47,24 @@ impl AcpServerFactory {
     pub async fn serve_stdio(&self) -> Result<(), AcpTransportError> {
         self.component(AcpTransportKind::Stdio)
             .connect_to(Stdio::new())
+            .await?;
+        Ok(())
+    }
+
+    /// Runs one in-process ACP connection over string frames: `outgoing`
+    /// receives each JSON text the server writes and `incoming` yields each one
+    /// it reads. The connection ends when `incoming` ends.
+    pub async fn serve_lines<O, I>(
+        &self,
+        outgoing: O,
+        incoming: I,
+    ) -> Result<(), AcpTransportError>
+    where
+        O: futures::Sink<String, Error = std::io::Error> + Send + 'static,
+        I: futures::Stream<Item = std::io::Result<String>> + Send + 'static,
+    {
+        self.component(AcpTransportKind::InProcess)
+            .connect_to(Lines::new(outgoing, incoming))
             .await?;
         Ok(())
     }

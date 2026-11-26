@@ -1,0 +1,55 @@
+import { Text, View } from "nsh";
+import type { JSX } from "nsh/jsx-runtime";
+
+import type { Tone } from "./tokens";
+import { toneFill, toneSoft, type } from "./tokens";
+
+/** Each surface's look: a content card, or the floating composer card (spec §5.1). */
+const surfaceVariant = {
+  card: "rounded-(--radius-lg) border border-border bg-card p-4 gap-3",
+  floating: "rounded-(--radius-xl) border border-border bg-background p-3 gap-2 shadow-md",
+} as const;
+
+/** A container for a group of content: a `card` (default) or the `floating` composer card. */
+export function Surface(props: { children: JSX.Element; variant?: keyof typeof surfaceVariant; class?: string }) {
+  return <View class={`${surfaceVariant[props.variant ?? "card"]} ${props.class ?? ""}`}>{props.children}</View>;
+}
+
+/** A short state, count or classification; neutral unless the state carries a meaning. */
+export function Badge(props: { label: string; tone?: Tone }) {
+  return (
+    <View class={`h-5 justify-center rounded-full px-2 ${toneSoft[props.tone ?? "neutral"]}`}>
+      <Text class={`${type.meta} font-medium`}>{props.label}</Text>
+    </View>
+  );
+}
+
+/** A divider between groups; vertical inside a row. */
+export function Separator(props: { vertical?: boolean }) {
+  return <View class={props.vertical === true ? "w-px self-stretch bg-border" : "h-px self-stretch bg-border"} />;
+}
+
+/**
+ * A small status dot with its label (never color alone); pulses while `live`. With `hideLabel` the label is only
+ * spoken, for dense rows where a nearby title already says what the dot belongs to.
+ */
+export function StatusDot(props: { tone: Tone; label: string; live?: boolean; hideLabel?: boolean }) {
+  return (
+    <View class="flex-row items-center gap-1.5" accessibilityLabel={props.label}>
+      <View class={`size-2 rounded-full ${toneFill[props.tone]} ${props.live === true ? "animate-pulse motion-reduce:animate-none" : ""}`} />
+      <If when={props.hideLabel !== true}>
+        <Text class={`${type.meta} text-muted-foreground`}>{props.label}</Text>
+      </If>
+    </View>
+  );
+}
+
+/** A diff's added and removed line counts. */
+export function LineCounts(props: { added: number; removed: number }) {
+  return (
+    <View class="flex-row gap-1.5" accessibilityLabel={`${props.added} lines added, ${props.removed} removed`}>
+      <Text class={`${type.meta} font-mono text-added`}>+{props.added}</Text>
+      <Text class={`${type.meta} font-mono text-removed`}>−{props.removed}</Text>
+    </View>
+  );
+}

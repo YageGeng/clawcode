@@ -1,0 +1,21 @@
+# Offline configuration for `nsh test`: an unreachable fixture provider and a
+# data root under the app's git-ignored `target/`, so tests never touch the
+# user's own configuration or sessions. Run the tests with
+# `CLAW_CONFIG=$PWD/tests/fixture/config.toml nsh test` from `apps/desktop`.
+active_model = "fixture/model"
+
+[session_persistence]
+# Relative to the test runner's working directory, `apps/desktop`.
+data_home = "target/fixture-data"
+
+[[providers]]
+id = "fixture"
+display_name = "Fixture"
+base_url = "https://example.invalid"
+api_key = "sk-test"
+
+[[providers.models]]
+id = "model"
+display_name = "Fixture Model"
+context_tokens = 32768
+max_output_tokens = 1024

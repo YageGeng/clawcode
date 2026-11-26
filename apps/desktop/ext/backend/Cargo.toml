@@ -1,0 +1,37 @@
+[package]
+name = "clawcode-backend"
+version = "0.1.0"
+edition.workspace = true
+publish = false
+
+[lints]
+workspace = true
+
+[dependencies]
+# workspace crates
+acp = { workspace = true }
+app = { workspace = true }
+config = { workspace = true }
+
+# tracing & log
+tracing = { workspace = true }
+
+# async
+futures = { workspace = true }
+tokio = { workspace = true, features = ["macros", "rt-multi-thread"] }
+
+# builder
+typed-builder = { workspace = true }
+
+# gui
+nsh-core = { workspace = true }
+
+[dev-dependencies]
+# workspace crates
+protocol = { workspace = true }
+
+# serde
+serde_json = { workspace = true }
+
+# fs
+tempfile = { workspace = true }
