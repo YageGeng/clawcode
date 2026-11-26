@@ -31,6 +31,9 @@ serde_json = { workspace = true }
 typed-builder = { workspace = true }
 
 # fs
+cap-fs-ext = { workspace = true }
+cap-std = { workspace = true }
+cap-tempfile = { workspace = true }
 dirs = { workspace = true }
 grep = { workspace = true }
 ignore = { workspace = true }
@@ -48,6 +51,10 @@ shlex = { workspace = true }
 similar = { workspace = true }
 unicode-normalization = { workspace = true }
 url = { workspace = true }
+
+[target.'cfg(target_os = "linux")'.dependencies]
+# fs
+xattr = { workspace = true }
 
 [dev-dependencies]
 # async

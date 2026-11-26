@@ -1,4 +1,5 @@
-import { cleanup, mount } from "nsh";
+import { WindowControls } from "clawcode-backend";
+import { cleanup, mount, platform } from "nsh";
 import { Application, currentWindow, isAvailable } from "nsh/desktop";
 
 import { Shell } from "./src/shell/Shell";
@@ -7,12 +8,16 @@ import { createAppStore } from "./src/stores/app";
 import { createHostStore, LOCAL_HOST } from "./src/stores/host";
 import { createSettingsStore } from "./src/stores/settings";
 import { NativeTransport } from "./src/transport/native";
+import { configureDesktopFonts } from "./src/ui/fonts";
 
 /** The app's root: owns the stores, this computer's host and the in-process backend behind it. */
 function App() {
   // The shell draws its own title bar; the system keeps only its window buttons. The main window's size, least
   // size and restored placement are launch options in nsh.json's "window".
-  if (isAvailable) currentWindow().set({ titleBar: { style: "hidden", height: TITLE_BAR_HEIGHT } });
+  if (isAvailable) {
+    if (platform.os === "linux") WindowControls.styleTitleBar();
+    currentWindow().set({ titleBar: { style: "hidden", height: TITLE_BAR_HEIGHT } });
+  }
   const transport = new NativeTransport();
   const store = createAppStore([createHostStore(LOCAL_HOST, transport)]);
   const settings = createSettingsStore();
@@ -29,4 +34,5 @@ function App() {
   return <Shell store={store} settings={settings} />;
 }
 
+configureDesktopFonts();
 mount(App);

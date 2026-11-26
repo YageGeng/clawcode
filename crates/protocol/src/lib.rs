@@ -157,10 +157,11 @@ pub use slash_command::{
     SlashCommandSource, SlashCommandStatus,
 };
 pub use tool::{
-    McpResourcePageKind, ToolAnnotations, ToolCall, ToolDefinition,
-    ToolExposure, ToolLocation, ToolMetadata, ToolOutputInfo, ToolOutputPolicy,
-    ToolOutputSaveFailure, ToolResult, ToolResultDetails, ToolSelection,
-    TruncationDetails, TruncationLimit,
+    FileApprovalDecision, FileApprovalRequest, McpResourcePageKind,
+    ToolAnnotations, ToolCall, ToolDefinition, ToolExposure, ToolLocation,
+    ToolMetadata, ToolOutputInfo, ToolOutputPolicy, ToolOutputSaveFailure,
+    ToolResult, ToolResultDetails, ToolSelection, TruncationDetails,
+    TruncationLimit,
 };
 pub use trajectory::{
     AssistantRecord, CommandKind, CommandRecord, ContentHash, ContentHashError,

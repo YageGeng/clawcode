@@ -14,7 +14,9 @@ CLAW_CONFIG=$PWD/tests/fixture/config.toml nsh test   # cargo test, then *.test.
 nsh run      # opens the app with hot reload
 ```
 
-Keep the `nsh-*` crates in the root `Cargo.toml` at the version of the `nsh` CLI in use (currently 0.6.1).
+Use the `nsh` CLI version 0.7.1 to match `nsh-core` in the root `Cargo.toml`.
+The supported Linux session is Wayland. Use `GDK_BACKEND=wayland nsh run` to launch the GTK app
+and the same environment variable with `nsh test --target linux` for native UI checks.
 
 The TSX tests start the real backend, which reads `CLAW_CONFIG`. Always point it at
 `tests/fixture/config.toml` (an offline provider, data under `target/fixture-data`) so tests never open your own

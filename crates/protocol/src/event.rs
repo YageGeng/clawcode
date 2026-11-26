@@ -349,6 +349,20 @@ pub enum AgentEventPayload {
         result: McpElicitationResult,
     },
 
+    /// A built-in file mutation is waiting for permission to change an external file.
+    FileApprovalRequested {
+        /// The resolved target and identities needed to route an answer.
+        request: crate::FileApprovalRequest,
+    },
+
+    /// A client responded to the permission request or the Run was stopped.
+    FileApprovalResolved {
+        /// Request previously published to clients.
+        request_id: String,
+        /// Single-use disposition of the file change.
+        decision: crate::FileApprovalDecision,
+    },
+
     /// A plan submitted through `exit_plan_mode` is waiting for the user.
     PlanApprovalRequested {
         /// The plan and the identities that route the answer.

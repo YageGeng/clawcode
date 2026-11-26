@@ -50,9 +50,11 @@ macOS 和 Linux 默认把会话日志、SQLite 数据库、凭据和 shell 快�
 
 ```toml
 active_model = "deepseek/deepseek-v4-pro"
-# 尚未实现审批提示：工具总是直接执行，不会请求批准。
-# 设置为 "yolo" 以外的值会在启动时记录一条警告。
-approval = "yolo"
+# 内置 write 或 edit 修改会话工作区外的文件时，每次都请求批准。
+# 子代理需要修改外部文件时，应将目标路径和改动交给父代理，由父代理申请批准并执行。
+# 在 Linux 上，此模式下保存文件需要父目录的写权限。指向同一文件的其他硬链接保留原内容。
+# 无人值守的客户端可设置为 "never"，自动允许这类修改。
+approval_policy = "on-request"
 
 [[providers]]
 id = "deepseek"

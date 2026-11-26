@@ -1,0 +1,88 @@
+/* NSH places the system controls directly in the app overlay. Native dialogs use a headerbar. */
+overlay > windowcontrols > button {
+  min-width: 32px;
+  min-height: 32px;
+  margin: 0 1px;
+  padding: 0;
+  border: 0;
+  border-radius: 8px;
+  background: none;
+  box-shadow: none;
+  color: #626870;
+}
+
+/* The content and the two control groups are siblings under NSH's overlay. */
+overlay > .nsh-dark ~ windowcontrols > button {
+  color: #c0c3c7;
+}
+
+/* GTK themes may also draw the button surface on the symbolic image. */
+overlay > windowcontrols > button > image {
+  min-width: 0;
+  min-height: 0;
+  padding: 0;
+  border: 0;
+  background: none;
+  box-shadow: none;
+  -gtk-icon-shadow: none;
+}
+
+/* Keep GTK's actions, accessible names and hit areas, with the same fine strokes as the toolbar. */
+overlay > windowcontrols > button.minimize > image,
+overlay > windowcontrols > button.maximize > image,
+overlay > windowcontrols > button.close > image {
+  opacity: 0;
+}
+
+overlay > windowcontrols > button.minimize,
+overlay > windowcontrols > button.maximize,
+overlay > windowcontrols > button.close {
+  background-repeat: no-repeat;
+  background-position: center;
+}
+
+overlay > windowcontrols > button.minimize {
+  background-image: linear-gradient(currentColor, currentColor);
+  background-size: 10px 1.25px;
+}
+
+overlay > windowcontrols > button.maximize {
+  background-image: linear-gradient(to right, currentColor 1.25px, transparent 1.25px, transparent 8.75px, currentColor 8.75px),
+                    linear-gradient(to bottom, currentColor 1.25px, transparent 1.25px, transparent 8.75px, currentColor 8.75px);
+  background-size: 10px 10px;
+}
+
+/* The system restore icon follows maximize state and the user's icon theme. */
+window.maximized overlay > windowcontrols > button.maximize {
+  background-image: none;
+}
+
+window.maximized overlay > windowcontrols > button.maximize > image {
+  opacity: 1;
+}
+
+overlay > windowcontrols > button.close {
+  background-image: linear-gradient(45deg, transparent 44%, currentColor 46%, currentColor 54%, transparent 56%),
+                    linear-gradient(-45deg, transparent 44%, currentColor 46%, currentColor 54%, transparent 56%);
+  background-size: 10px 10px;
+}
+
+overlay > windowcontrols > button:hover {
+  background-color: alpha(currentColor, 0.09);
+}
+
+overlay > windowcontrols > button:active {
+  background-color: alpha(currentColor, 0.16);
+}
+
+overlay > windowcontrols > button.close:hover,
+overlay > .nsh-dark ~ windowcontrols > button.close:hover {
+  background-color: #c42b3a;
+  color: white;
+}
+
+overlay > windowcontrols > button.close:active,
+overlay > .nsh-dark ~ windowcontrols > button.close:active {
+  background-color: #a52130;
+  color: white;
+}

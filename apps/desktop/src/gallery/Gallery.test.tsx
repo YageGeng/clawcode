@@ -20,6 +20,14 @@ test("buttons_report_presses_and_disabled_ignores", async () => {
   await app.waitFor("text:Pressed 1");
 });
 
+// Some platforms acknowledge the request before they can confirm the write.
+test("copy_button_writes_the_gallery_command", async () => {
+  const app = await openGallery();
+  await app.press("label:Copy");
+  await app.waitUntil(() => app.count("label:Copied") + app.count("label:Copy requested") > 0);
+  expect(app.clipboard()).toBe("cargo test --workspace");
+});
+
 test("menu_opens_and_closes_with_escape", async () => {
   const app = await openGallery();
   await app.press("Session actions");

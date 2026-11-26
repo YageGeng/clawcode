@@ -29,7 +29,7 @@ use crate::extension::{
 };
 use crate::input::PromptInput;
 use crate::login::LoginTask;
-use crate::permission::PlanApprovalChange;
+use crate::permission::ApprovalBridge;
 use crate::plan::HiddenToolCalls;
 use crate::projection::{
     DurableResumeSelection, EventGroup, ForegroundState, LiveFeed,
@@ -101,6 +101,7 @@ impl From<LiveFeed> for ProjectionWatch {
 pub(crate) struct SessionWatcher {
     pub(crate) cancellation: Arc<CancellationToken>,
     pub(crate) delivery: SessionDelivery,
+    approvals: Arc<ApprovalBridge>,
 }
 
 /// Session watchers installed on one ACP connection; membership defines an active Session.
@@ -518,27 +519,42 @@ impl AcpServer {
         connection: &V2ConnectionTo<Client>,
         watched: SessionWatchers,
         mut watch: ProjectionWatch,
-    ) -> Result<(), agent_client_protocol::Error> {
+    ) -> Result<Arc<ApprovalBridge>, agent_client_protocol::Error> {
         let cancellation = Arc::new(CancellationToken::new());
         // Backlog groups are at or before the subscription boundary, so progress
         // starts there and only advances as live groups are queued.
         let (delivery, publisher) = SessionDelivery::new(watch.delivered);
-        {
+        let approvals = {
             let mut watchers = watched.lock().map_err(|_poison_error| {
                 agent_client_protocol::Error::into_internal_error(
                     std::io::Error::other("ACP Session watcher lock poisoned"),
                 )
             })?;
+            // Replacing this connection's watcher preserves its existing prompts and peer identity.
+            let approvals = match watchers.get(session_id) {
+                Some(previous) => Arc::clone(&previous.approvals),
+                None => self
+                    .projections
+                    .projection(session_id)
+                    .map_err(agent_client_protocol::Error::into_internal_error)?
+                    .approval_peers
+                    .attach(session_id, connection, &self.kernel)
+                    .map_err(
+                        agent_client_protocol::Error::into_internal_error,
+                    )?,
+            };
             if let Some(previous) = watchers.insert(
                 session_id.clone(),
                 SessionWatcher {
                     cancellation: Arc::clone(&cancellation),
                     delivery,
+                    approvals: Arc::clone(&approvals),
                 },
             ) {
                 previous.cancellation.cancel();
             }
-        }
+            approvals
+        };
         for group in std::mem::take(&mut watch.backlog) {
             // Replayed history never reports past states as current activity.
             if let Some(replayed) = group.replayed() {
@@ -601,6 +617,7 @@ impl AcpServer {
         let task_connection = connection.clone();
         let task_session_id = session_id.clone();
         let task_cancellation = Arc::clone(&cancellation);
+        let task_approvals = Arc::clone(&approvals);
         connection.spawn(async move {
             tracing::info!(
                 "started ACP Session watcher for Session {}",
@@ -707,21 +724,8 @@ impl AcpServer {
                         }
                         None => {}
                     }
-                    match &group.plan_approval {
-                        Some(PlanApprovalChange::Requested(request)) => {
-                            elicitations.approvals.request(
-                                &task_connection,
-                                &kernel,
-                                &task_session_id,
-                                request,
-                            );
-                        }
-                        Some(PlanApprovalChange::Resolved { request_id }) => {
-                            elicitations
-                                .approvals
-                                .resolved(&task_session_id, request_id);
-                        }
-                        None => {}
+                    if let Some(change) = &group.approval {
+                        task_approvals.apply(change).map_err(agent_client_protocol::Error::into_internal_error)?;
                     }
                     watch.record_sent(&group);
                     publisher.sent_through(group.sequence);
@@ -740,7 +744,7 @@ impl AcpServer {
             );
             outcome
         })?;
-        Ok(())
+        Ok(approvals)
     }
 }
 
@@ -1315,7 +1319,7 @@ impl AcpServerFactory {
                             &connection,
                             mcp_watchers,
                         )?;
-                        server.watch_projection(
+                        let approvals = server.watch_projection(
                             &session_id,
                             &connection,
                             session_watchers,
@@ -1323,6 +1327,7 @@ impl AcpServerFactory {
                         )?;
                         // Pending requests follow replay and the state snapshot.
                         server.reestablish_elicitations(&session_id, &connection)?;
+                        approvals.reestablish().map_err(agent_client_protocol::Error::into_internal_error)?;
                         responder.respond(
                             wire::ResumeSessionResponse::new()
                                 .available_commands(commands)

@@ -4,7 +4,7 @@ use protocol::{
 };
 use serde::Deserialize;
 
-use super::mutation::with_file_mutation;
+use super::mutation::FileMutation;
 use super::path::ResolvedPath;
 use crate::{AgentTool, ToolError, ToolExecutionContext};
 
@@ -95,37 +95,35 @@ impl AgentTool for WriteTool {
         context: &ToolExecutionContext,
     ) -> Result<ToolResult, ToolError> {
         let arguments = WriteArguments::try_from(&call)?;
-        let absolute = ResolvedPath::new(&arguments.path, &context.cwd)?;
-        with_file_mutation(absolute.as_path(), || async {
-            context.ensure_active()?;
-            if let Some(parent) = absolute.as_path().parent() {
-                tokio::fs::create_dir_all(parent).await.map_err(|error| {
-                    ToolError::Execution {
-                        tool: call.name.clone(),
-                        message: error.to_string(),
-                    }
-                })?;
-            }
-            context.ensure_active()?;
-            tokio::fs::write(absolute.as_path(), arguments.content.as_bytes())
-                .await
-                .map_err(|error| ToolError::Execution {
+        let target =
+            FileMutation::prepare(&arguments.path, &call, context).await?;
+        let _guard = target.lock().await;
+        context.ensure_active()?;
+        let written = arguments.content.encode_utf16().count();
+        target
+            .save(None, arguments.content)
+            .await
+            .map_err(|error| {
+                tracing::warn!(
+                    "could not save write target {}: {}",
+                    target.path.display(),
+                    error
+                );
+                ToolError::Execution {
                     tool: call.name.clone(),
                     message: error.to_string(),
-                })?;
-            context.ensure_active()?;
-            Ok(ToolResult::builder()
-                .tool_call_id(call.tool_call_id)
-                .blocks(vec![ContentBlock::Text {
-                    text: format!(
-                        "Successfully wrote {} bytes to {}",
-                        arguments.content.encode_utf16().count(),
-                        arguments.path
-                    ),
-                }])
-                .is_error(false)
-                .build())
-        })
-        .await
+                }
+            })?;
+        context.ensure_active()?;
+        Ok(ToolResult::builder()
+            .tool_call_id(call.tool_call_id)
+            .blocks(vec![ContentBlock::Text {
+                text: format!(
+                    "Successfully wrote {} bytes to {}",
+                    written, arguments.path
+                ),
+            }])
+            .is_error(false)
+            .build())
     }
 }

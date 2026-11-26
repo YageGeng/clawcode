@@ -12,7 +12,7 @@ use tokio::sync::broadcast;
 
 use crate::AcpEventMapper;
 use crate::elicitation::ElicitationChange;
-use crate::permission::PlanApprovalChange;
+use crate::permission::{ApprovalChange, ApprovalPeers, PendingApproval};
 use crate::plan::HiddenToolCalls;
 use crate::recovery::{
     GroupMeta, OperationPhase, RecoveryMode, RecoveryPlan, SessionCursor,
@@ -39,9 +39,9 @@ pub(crate) struct EventGroup {
     /// Elicitation change for live watchers; replay drops it so settled requests are not re-sent.
     #[builder(default)]
     pub(crate) elicitation: Option<ElicitationChange>,
-    /// Plan approval change for live watchers; replay drops it like an elicitation.
+    /// Tool or plan approval change for live watchers; replay drops it like an elicitation.
     #[builder(default)]
-    pub(crate) plan_approval: Option<PlanApprovalChange>,
+    pub(crate) approval: Option<ApprovalChange>,
     /// Namespaced snapshot key; a newer queue or terminal view replaces it in the journal.
     #[builder(default)]
     pub(crate) snapshot_of: Option<String>,
@@ -83,7 +83,7 @@ impl EventGroup {
             operation_phase: self.operation_phase,
             operation_kind: self.operation_kind,
             elicitation: None,
-            plan_approval: None,
+            approval: None,
             snapshot_of: self.snapshot_of.clone(),
         })
     }
@@ -271,6 +271,7 @@ pub(crate) enum DurableResumeSelection {
 pub(crate) struct SessionProjection {
     state: Mutex<ProjectionState>,
     sender: broadcast::Sender<Arc<EventGroup>>,
+    pub(crate) approval_peers: Arc<ApprovalPeers>,
 }
 
 impl SessionProjection {
@@ -280,6 +281,7 @@ impl SessionProjection {
         Self {
             state: Mutex::new(ProjectionState::default()),
             sender,
+            approval_peers: Arc::default(),
         }
     }
 
@@ -798,7 +800,7 @@ impl ProjectionRegistry {
     }
 
     /// Resolves or creates one Session projection without holding the map lock afterward.
-    fn projection(
+    pub(crate) fn projection(
         &self,
         session_id: &SessionId,
     ) -> Result<Arc<SessionProjection>, ProjectionError> {
@@ -982,12 +984,20 @@ impl EventSink for ProjectionSink {
             }),
             _ => None,
         };
-        let plan_approval = match &event.payload {
+        let approval = match &event.payload {
             AgentEventPayload::PlanApprovalRequested { request } => {
-                Some(PlanApprovalChange::Requested(Box::new(request.clone())))
+                Some(ApprovalChange::Requested(Arc::new(
+                    PendingApproval::Plan(request.clone()),
+                )))
             }
-            AgentEventPayload::PlanApprovalResolved { request_id, .. } => {
-                Some(PlanApprovalChange::Resolved {
+            AgentEventPayload::FileApprovalRequested { request } => {
+                Some(ApprovalChange::Requested(Arc::new(
+                    PendingApproval::File(request.clone()),
+                )))
+            }
+            AgentEventPayload::PlanApprovalResolved { request_id, .. }
+            | AgentEventPayload::FileApprovalResolved { request_id, .. } => {
+                Some(ApprovalChange::Resolved {
                     request_id: request_id.clone(),
                 })
             }
@@ -1014,7 +1024,7 @@ impl EventSink for ProjectionSink {
             .metadata(metadata)
             .updates(updates)
             .elicitation(elicitation)
-            .plan_approval(plan_approval)
+            .approval(approval)
             .snapshot_of(snapshot_of);
         let group = match (run_id, operation_phase, operation_kind) {
             (Some(run_id), Some(operation_phase), Some(operation_kind)) => {

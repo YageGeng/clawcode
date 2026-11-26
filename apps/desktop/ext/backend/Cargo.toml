@@ -26,6 +26,11 @@ typed-builder = { workspace = true }
 # gui
 nsh-core = { workspace = true }
 
+[target.'cfg(target_os = "linux")'.dependencies]
+# gui
+gtk4 = { workspace = true, features = ["v4_12"] }
+pangocairo = { workspace = true }
+
 [dev-dependencies]
 # workspace crates
 protocol = { workspace = true }

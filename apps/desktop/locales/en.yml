@@ -3,6 +3,8 @@ common:
   dismiss: Dismiss
   copy: Copy
   copied: Copied
+  copyRequested: Copy requested
+  copyFailed: Copy failed
   cancel: Cancel
 settings:
   title: Settings

@@ -1,5 +1,5 @@
 use std::collections::{BTreeMap, btree_map::Entry};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use async_trait::async_trait;
@@ -24,6 +24,17 @@ impl ToolUpdateSink for DiscardToolUpdates {
     fn publish(&self, _update: ToolResult) {}
 }
 
+/// Authorizes one built-in mutation of a resolved file outside the session workspace.
+#[async_trait]
+pub trait FileMutationApprover: Send + Sync {
+    /// Waits for the decision about this call and target before any mutation.
+    async fn approve(
+        &self,
+        call: &ToolCall,
+        target: &Path,
+    ) -> Result<(), ToolError>;
+}
+
 /// Runtime context supplied to every tool invocation.
 #[derive(Clone, typed_builder::TypedBuilder)]
 pub struct ToolExecutionContext {
@@ -41,6 +52,10 @@ pub struct ToolExecutionContext {
 
     /// Destination for replaceable partial tool snapshots.
     pub updates: Arc<dyn ToolUpdateSink>,
+
+    /// Approval channel installed when the session uses on-request file permissions.
+    #[builder(default)]
+    pub file_mutation_approver: Option<Arc<dyn FileMutationApprover>>,
 }
 
 impl ToolExecutionContext {

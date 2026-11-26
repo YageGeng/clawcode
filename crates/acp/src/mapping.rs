@@ -742,6 +742,8 @@ impl<'a> AcpEventMapper<'a> {
             ],
             AgentEventPayload::McpElicitationRequested { .. }
             | AgentEventPayload::McpElicitationResolved { .. }
+            | AgentEventPayload::FileApprovalRequested { .. }
+            | AgentEventPayload::FileApprovalResolved { .. }
             | AgentEventPayload::PlanApprovalRequested { .. }
             | AgentEventPayload::PlanApprovalResolved { .. } => {
                 vec![self.extension_update()?]
@@ -885,6 +887,8 @@ impl<'a> AcpEventMapper<'a> {
             | AgentEventPayload::SkillDiagnostic { .. }
             | AgentEventPayload::McpElicitationRequested { .. }
             | AgentEventPayload::McpElicitationResolved { .. }
+            | AgentEventPayload::FileApprovalRequested { .. }
+            | AgentEventPayload::FileApprovalResolved { .. }
             | AgentEventPayload::PlanApprovalRequested { .. }
             | AgentEventPayload::PlanApprovalResolved { .. }
             | AgentEventPayload::UserBashFinished { .. }

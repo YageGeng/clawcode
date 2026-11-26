@@ -1,4 +1,5 @@
 mod ask_user;
+mod file_approval;
 #[allow(dead_code)]
 #[path = "../subagent/fixture.rs"]
 mod fixture;

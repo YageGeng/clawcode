@@ -2,6 +2,42 @@ use serde::{Deserialize, Serialize};
 
 use crate::{ContentBlock, McpToolRef, ToolCallId};
 
+/// A single built-in file mutation waiting for a client's permission.
+#[derive(
+    Debug,
+    Clone,
+    PartialEq,
+    Eq,
+    Serialize,
+    Deserialize,
+    typed_builder::TypedBuilder,
+)]
+#[serde(rename_all = "camelCase")]
+pub struct FileApprovalRequest {
+    /// Unique across calls, even when a model reuses a tool call id.
+    pub request_id: String,
+    /// Correlates this request with the visible tool invocation.
+    pub tool_call_id: ToolCallId,
+    /// Built-in operation that will modify the file.
+    pub tool_name: String,
+    /// Resolved absolute target the operation is authorized to modify.
+    pub path: std::path::PathBuf,
+}
+
+/// Disposition of one file mutation, valid for this invocation only.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum FileApprovalDecision {
+    /// Perform this mutation.
+    Allow,
+    /// Decline this mutation.
+    Reject,
+    /// The permission prompt or its owning Run was cancelled.
+    Cancelled,
+    /// Every attached client failed to present this permission request.
+    Unavailable,
+}
+
 /// Persisted preferences, independent from the current connection catalog.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ToolSelection {

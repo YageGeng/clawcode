@@ -39,6 +39,372 @@ fn registry() -> tools::ToolRegistry {
         .expect("built-in registry")
 }
 
+/// Delivers the canonical path to a test client and waits for its one-shot decision.
+struct ApprovalClient {
+    requests: tokio::sync::mpsc::UnboundedSender<(
+        std::path::PathBuf,
+        tokio::sync::oneshot::Sender<bool>,
+    )>,
+}
+
+#[async_trait::async_trait]
+impl tools::FileMutationApprover for ApprovalClient {
+    /// Holds execution before filesystem changes until the test client answers.
+    async fn approve(
+        &self,
+        call: &ToolCall,
+        target: &Path,
+    ) -> Result<(), tools::ToolError> {
+        let (answer, decision) = tokio::sync::oneshot::channel();
+        self.requests
+            .send((target.to_owned(), answer))
+            .expect("report approval");
+        if decision.await.unwrap_or(false) {
+            Ok(())
+        } else {
+            Err(tools::ToolError::Execution {
+                tool: call.name.clone(),
+                message: "Denied by user".into(),
+            })
+        }
+    }
+}
+
+/// External requests wait without creating parent directories or modifying existing bytes.
+#[tokio::test]
+async fn file_approval_blocks_external_writes_and_edits_before_side_effects() {
+    let root = tempfile::tempdir().expect("temporary root");
+    let workspace = root.path().join("work");
+    std::fs::create_dir(&workspace).expect("create workspace");
+    let outside = root.path().join("work-other");
+    std::fs::create_dir(&outside).expect("create sibling");
+    std::fs::write(outside.join("existing"), "before").expect("original file");
+    let (requests, mut incoming) = tokio::sync::mpsc::unbounded_channel();
+    let mut context = execution_context(&workspace);
+    context.file_mutation_approver =
+        Some(Arc::new(ApprovalClient { requests }));
+    let registry = registry();
+    // Prefix-sharing sibling directories are distinct workspace roots.
+    for (tool, path, args) in [
+        (
+            "write",
+            "new/file",
+            serde_json::json!({"path": "../work-other/new/file", "content": "after"}),
+        ),
+        (
+            "edit",
+            "existing",
+            serde_json::json!({"path": "../work-other/existing", "edits": [{"oldText": "before", "newText": "after"}]}),
+        ),
+    ] {
+        let mut execution =
+            Box::pin(registry.execute(tool_call("call", tool, args), &context));
+        let (target, answer) = tokio::select! {
+            result = &mut execution => panic!("external {tool} completed without approval: {result:?}"),
+            request = incoming.recv() => request.expect("approval request"),
+        };
+        assert_eq!(
+            target,
+            outside
+                .canonicalize()
+                .expect("physical sibling path")
+                .join(path)
+        );
+        assert!(!outside.join("new").exists());
+        assert_eq!(
+            std::fs::read(outside.join("existing")).expect("read original"),
+            b"before"
+        );
+        answer.send(false).expect("reject");
+        execution.await.expect_err("mutation must be blocked");
+        assert!(!outside.join("new").exists());
+        assert_eq!(
+            std::fs::read(outside.join("existing")).expect("read original"),
+            b"before"
+        );
+    }
+    let inside = url::Url::from_file_path(workspace.join("new/file"))
+        .expect("local file URL");
+    let call = tool_call(
+        "inside",
+        "write",
+        serde_json::json!({"path": inside.as_str(), "content":"ok"}),
+    );
+    tokio::select! {
+        result = registry.execute(call, &context) => { result.expect("inside write"); }
+        request = incoming.recv() => panic!("unexpected approval for workspace target: {request:?}"),
+    }
+    assert_eq!(
+        std::fs::read(workspace.join("new/file")).expect("read inside write"),
+        b"ok"
+    );
+    // A directory-only spelling must never create a regular file when the leaf is missing.
+    let invalid = tool_call(
+        "directory",
+        "write",
+        serde_json::json!({"path":"directory/", "content":"wrong"}),
+    );
+    registry
+        .execute(invalid, &context)
+        .await
+        .expect_err("directory spelling");
+    assert!(!workspace.join("directory").is_file());
+}
+
+/// Each guarded file save updates only its named workspace entry and preserves its mode.
+#[tokio::test]
+async fn file_approval_preserves_other_names_of_workspace_files() {
+    let root = tempfile::tempdir().expect("project and backups");
+    let workspace = root.path().join("work");
+    let backups = root.path().join("backups");
+    std::fs::create_dir(&workspace).expect("workspace");
+    std::fs::create_dir(&backups).expect("backups");
+    let (requests, incoming) = tokio::sync::mpsc::unbounded_channel();
+    drop(incoming);
+    let mut context = execution_context(&workspace);
+    context.file_mutation_approver =
+        Some(Arc::new(ApprovalClient { requests }));
+    let tools = registry();
+    for (tool, args) in [
+        (
+            "write",
+            serde_json::json!({"path":"write", "content":"version two"}),
+        ),
+        (
+            "edit",
+            serde_json::json!({"path":"edit", "oldText":"one", "newText":"two"}),
+        ),
+    ] {
+        let working_copy = workspace.join(tool);
+        std::fs::write(&working_copy, "version one")
+            .expect("original document");
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt as _;
+            std::fs::set_permissions(
+                &working_copy,
+                std::fs::Permissions::from_mode(0o750),
+            )
+            .expect("set document permissions");
+        }
+        let backup = backups.join(tool);
+        std::fs::hard_link(&working_copy, &backup)
+            .expect("back up the working copy");
+        let result = tools.execute(tool_call(tool, tool, args), &context).await;
+        #[cfg(target_os = "linux")]
+        {
+            result.expect("save working copy");
+            assert_eq!(
+                std::fs::read(&working_copy).expect("updated copy"),
+                b"version two"
+            );
+        }
+        #[cfg(not(target_os = "linux"))]
+        result.expect_err("shared file requires an isolated replacement");
+        assert_eq!(std::fs::read(&backup).expect("backup"), b"version one");
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt as _;
+            assert_eq!(
+                std::fs::metadata(&working_copy)
+                    .expect("document metadata")
+                    .permissions()
+                    .mode()
+                    & 0o777,
+                0o750
+            );
+        }
+    }
+    assert_eq!(
+        std::fs::read_dir(&workspace)
+            .expect("workspace entries")
+            .count(),
+        2
+    );
+}
+
+/// Guarded replacement preserves a document's user metadata and rejects privileged mode bits.
+#[cfg(target_os = "linux")]
+#[tokio::test]
+async fn file_approval_preserves_metadata_and_refuses_privileged_files() {
+    use std::os::unix::fs::PermissionsExt as _;
+
+    let root = tempfile::tempdir().expect("workspace");
+    let document = root.path().join("notes");
+    std::fs::write(&document, "draft").expect("write document");
+    xattr::set(&document, "user.project", b"journal").expect("tag document");
+    // Linux encodes a POSIX ACL as a version and entries for owner, group, mask and others.
+    let mut acl = 2u32.to_le_bytes().to_vec();
+    for (tag, permissions) in [(1u16, 6u16), (4, 4), (16, 0), (32, 0)] {
+        acl.extend(tag.to_le_bytes());
+        acl.extend(permissions.to_le_bytes());
+        acl.extend(u32::MAX.to_le_bytes());
+    }
+    xattr::set(&document, "system.posix_acl_access", &acl)
+        .expect("set document ACL");
+    let (requests, incoming) = tokio::sync::mpsc::unbounded_channel();
+    drop(incoming);
+    let mut context = execution_context(root.path());
+    context.file_mutation_approver =
+        Some(Arc::new(ApprovalClient { requests }));
+    let tools = registry();
+    let mut call = tool_call(
+        "write-note",
+        "write",
+        serde_json::json!({"path":"notes", "content":"final"}),
+    );
+    tools
+        .execute(call.clone(), &context)
+        .await
+        .expect("save document");
+    assert_eq!(
+        xattr::get(&document, "user.project")
+            .expect("document tag")
+            .as_deref(),
+        Some(b"journal".as_slice())
+    );
+    assert_eq!(
+        xattr::get(&document, "system.posix_acl_access").expect("document ACL"),
+        Some(acl)
+    );
+    std::fs::set_permissions(
+        &document,
+        std::fs::Permissions::from_mode(0o4750),
+    )
+    .expect("set special mode");
+    call.arguments["content"] = serde_json::json!("revised");
+    tools
+        .execute(call, &context)
+        .await
+        .expect_err("special mode must be rejected");
+    assert_eq!(
+        std::fs::read(&document).expect("previous document"),
+        b"final"
+    );
+    assert_eq!(
+        std::fs::read_dir(root.path())
+            .expect("workspace entries")
+            .count(),
+        1
+    );
+}
+
+/// Editing requires every directory in the supplied path to exist before resolving parents.
+#[tokio::test]
+async fn file_approval_edit_requires_existing_intermediate_directories() {
+    let root = tempfile::tempdir().expect("workspace");
+    let document = root.path().join("notes");
+    std::fs::write(&document, "draft").expect("write document");
+    let (requests, incoming) = tokio::sync::mpsc::unbounded_channel();
+    drop(incoming);
+    let mut context = execution_context(root.path());
+    context.file_mutation_approver =
+        Some(Arc::new(ApprovalClient { requests }));
+    let call = tool_call(
+        "edit-note",
+        "edit",
+        serde_json::json!({
+            "path": "archive/../notes", "oldText": "draft", "newText": "final"
+        }),
+    );
+    registry()
+        .execute(call, &context)
+        .await
+        .expect_err("missing archive directory");
+    assert_eq!(
+        std::fs::read(&document).expect("original document"),
+        b"draft"
+    );
+    assert!(!root.path().join("archive").exists());
+}
+
+/// A dangling link preserves whether its destination names a file or requires a directory.
+#[cfg(unix)]
+#[tokio::test]
+async fn file_approval_preserves_dangling_link_directory_suffixes() {
+    let root = tempfile::tempdir().expect("workspace");
+    let (requests, incoming) = tokio::sync::mpsc::unbounded_channel();
+    drop(incoming); // Every destination in this test belongs to the workspace.
+    let mut context = execution_context(root.path());
+    context.file_mutation_approver =
+        Some(Arc::new(ApprovalClient { requests }));
+    let tools = registry();
+    for (name, destination) in [
+        ("slash", "missing/"),
+        ("dot", "missing/."),
+        ("file", "plain"),
+    ] {
+        std::os::unix::fs::symlink(destination, root.path().join(name))
+            .expect("dangling link");
+        let call = tool_call(
+            name,
+            "write",
+            serde_json::json!({"path": name, "content": "saved"}),
+        );
+        let result = tools.execute(call, &context).await;
+        if name == "file" {
+            result.expect("create a file through its link");
+            assert_eq!(
+                std::fs::read(root.path().join("plain")).expect("read file"),
+                b"saved"
+            );
+        } else {
+            result.expect_err("directory spelling");
+            assert!(!root.path().join("missing").exists());
+        }
+    }
+}
+
+/// An external path resolved through multiple links stays bound to the approved name.
+#[cfg(unix)]
+#[tokio::test]
+async fn file_approval_pins_dangling_symlinks_and_normalizes_parent_components()
+{
+    use std::os::unix::fs::symlink;
+    let root = tempfile::tempdir().expect("temporary root");
+    let workspace = root.path().join("project");
+    let external = root.path().join("external");
+    let other = root.path().join("other");
+    std::fs::create_dir(&workspace).expect("create workspace");
+    std::fs::create_dir_all(external.join("nested"))
+        .expect("create external target");
+    std::fs::create_dir(&other).expect("create other directory");
+    symlink("../external/nested", workspace.join("alias"))
+        .expect("workspace link");
+    symlink("missing/file", external.join("destination"))
+        .expect("dangling link");
+    let (requests, mut incoming) = tokio::sync::mpsc::unbounded_channel();
+    let mut context = execution_context(&workspace);
+    context.file_mutation_approver =
+        Some(Arc::new(ApprovalClient { requests }));
+    let tools = registry();
+    let call = tool_call(
+        "write-link",
+        "write",
+        serde_json::json!({
+            "path":"@alias/../destination", "content":"approved"
+        }),
+    );
+    let mut execution = Box::pin(tools.execute(call, &context));
+    let (target, answer) = tokio::select! {
+        result = &mut execution => panic!("linked destination completed without approval: {result:?}"),
+        request = incoming.recv() => request.expect("approval request"),
+    };
+    assert_eq!(
+        target,
+        external
+            .canonicalize()
+            .expect("physical external directory")
+            .join("missing/file")
+    );
+    assert!(!external.join("missing").exists());
+    // A formerly missing canonical component now points somewhere else.
+    symlink(&other, external.join("missing")).expect("replacement link");
+    answer.send(true).expect("allow");
+    execution.await.expect_err("mutation must be blocked");
+    assert!(!other.join("file").exists());
+}
+
 /// Creates the same valid 1x1 24bpp BMP shape used by pi's regression tests.
 fn tiny_bmp() -> Vec<u8> {
     let image = image::DynamicImage::ImageRgba8(ImageBuffer::from_pixel(

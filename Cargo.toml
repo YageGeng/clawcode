@@ -126,11 +126,15 @@ sha2 = "0.11"
 typed-builder = "0.23"
 
 # fs
+cap-fs-ext = "4"
+cap-std = "4"
+cap-tempfile = "4"
 grep = "0.4"
 ignore = "0.4"
 tempfile = "3"
 # Match Figment's TOML major version to avoid compiling parallel parser stacks.
 toml = "=0.8"
+xattr = "1"
 
 # database
 libsqlite3-sys = { version = "0.40", default-features = false }
@@ -141,8 +145,10 @@ agent-client-protocol = "5"
 agent-client-protocol-http = { version = "5", default-features = false }
 
 # gui
+gtk4 = "0.11"
 # Native Shell crates stay at the version of the installed `nsh` CLI.
-nsh-core = "0.6.1"
+nsh-core = "=0.7.1"
+pangocairo = "0.22"
 
 # cli
 clap = { version = "4", features = ["derive"] }

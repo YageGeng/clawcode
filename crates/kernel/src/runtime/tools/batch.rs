@@ -12,6 +12,7 @@ use tokio_util::sync::CancellationToken;
 use crate::runtime::plan::PlanModeGate;
 use crate::runtime::{EventEmitter, Kernel, KernelError, Session};
 
+use super::approval::FileApprovalGate;
 use super::update::{ToolExecutionUpdate, ToolUpdateChannel};
 
 /// Immutable inputs required to execute and correlate one complete tool batch.
@@ -89,6 +90,19 @@ impl Kernel {
         let (update_channel, mut update_stream) = ToolUpdateChannel::new();
         let mut terminate = false;
 
+        // The built-in mutation tools consult this gate after replacement and validation.
+        let file_mutation_approver = (self.approval_policy
+            == config::AskForApproval::OnRequest)
+            .then(|| {
+                Arc::new(
+                    FileApprovalGate::builder()
+                        .session(Arc::clone(batch.session))
+                        .turn_id(batch.turn_id.clone())
+                        .id_generator(Arc::clone(&self.id_generator))
+                        .cancellation(batch.cancellation.clone())
+                        .build(),
+                ) as Arc<dyn ::tools::FileMutationApprover>
+            });
         let calls = std::mem::take(&mut batch.calls);
         for (index, mut call) in calls.into_iter().enumerate() {
             let started_at = self.clock.now();
@@ -220,6 +234,9 @@ impl Kernel {
                 .turn_id(batch.turn_id.clone())
                 .trace_id(batch.trace_id.clone())
                 .cwd(batch.session.cwd.clone())
+                .file_mutation_approver(
+                    file_mutation_approver.as_ref().map(Arc::clone),
+                )
                 .cancellation(batch.cancellation.clone())
                 .updates(update_channel.publisher(call.clone()))
                 .build();

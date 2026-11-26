@@ -3,6 +3,8 @@ common:
   dismiss: 关闭通知
   copy: 复制
   copied: 已复制
+  copyRequested: 已请求复制
+  copyFailed: 复制失败
   cancel: 取消
 settings:
   title: 设置

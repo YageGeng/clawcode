@@ -160,8 +160,6 @@ pub(crate) struct ElicitationBridge {
     modes: OnceLock<ElicitationModes>,
     outstanding:
         Arc<Mutex<HashMap<(SessionId, String), RequestCancellationHandle>>>,
-    /// Plan approvals: another prompt a Run waits on, sent and withdrawn alongside.
-    pub(crate) approvals: crate::permission::PlanApprovalBridge,
 }
 
 impl ElicitationBridge {
@@ -345,7 +343,7 @@ impl ElicitationBridge {
         for request in kernel.mcp_elicitations(session_id)?.requests {
             self.request(connection, kernel, session_id, &request);
         }
-        self.approvals.reestablish(connection, kernel, session_id)
+        Ok(())
     }
 
     /// Hands one result to the Kernel; a request settled elsewhere is ignored.

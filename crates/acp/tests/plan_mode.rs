@@ -1,4 +1,4 @@
-//! Plan mode over ACP: the mode option, plan updates, and plan approval.
+//! Plan mode, plan updates, and tool approvals over ACP.
 
 use std::num::NonZeroUsize;
 use std::path::Path;
@@ -147,6 +147,18 @@ impl Model for PlanModel {
         _cancellation: CancellationToken,
     ) -> Result<ModelStream, ModelError> {
         Ok(match last_user_text(&request).as_str() {
+            "change external files" => Self::calls(vec![
+                (
+                    "call-write",
+                    "write",
+                    serde_json::json!({ "path": "../new/target", "content": "written" }),
+                ),
+                (
+                    "call-edit",
+                    "edit",
+                    serde_json::json!({ "path": "../existing", "oldText": "before", "newText": "after" }),
+                ),
+            ]),
             "plan it" => Self::calls(vec![(
                 "call-exit",
                 "exit_plan_mode",
@@ -269,6 +281,15 @@ fn server(
     root: &Path,
     policy: ToolPolicy,
 ) -> (Arc<Kernel>, Arc<AcpServerFactory>) {
+    server_with_approval(root, policy, config::AskForApproval::OnRequest)
+}
+
+/// Wires the test's approval policy through the same factory used by the application.
+fn server_with_approval(
+    root: &Path,
+    policy: ToolPolicy,
+    approval: config::AskForApproval,
+) -> (Arc<Kernel>, Arc<AcpServerFactory>) {
     let clock: Arc<dyn store::Clock> = Arc::new(SystemClock);
     let model = Arc::new(PlanModel {
         profile: ModelProfile::builder()
@@ -292,6 +313,7 @@ fn server(
     );
     let kernel = Arc::new(
         KernelFactory::builder()
+            .approval_policy(approval)
             .model_factory(Arc::new(PlanModelFactory(model)))
             .tool_factory(Arc::new(BuiltinToolFactory::new()))
             .store_factory(Arc::new(JsonlStoreFactory::new(
@@ -980,6 +1002,333 @@ async fn next_asked(side: &mut ClientSide) -> Asked {
         .expect("request stream")
 }
 
+/// Collects both sibling requests and verifies the wire subject matches each mutation.
+async fn file_requests(
+    side: &mut ClientSide,
+    root: &Path,
+) -> std::collections::BTreeMap<
+    String,
+    Responder<wire::RequestPermissionResponse>,
+> {
+    let mut requests = std::collections::BTreeMap::new();
+    for _ in 0..2 {
+        let (request, responder) = next_asked(side).await;
+        let value =
+            serde_json::to_value(&request).expect("serialize permission");
+        let field = |pointer: &str| {
+            value
+                .pointer(pointer)
+                .and_then(serde_json::Value::as_str)
+                .expect("permission field")
+        };
+        let call = field("/subject/toolCall/toolCallId");
+        let (tool, target) = if call == "call-write" {
+            ("write", root.join("new").join("target"))
+        } else {
+            assert_eq!(call, "call-edit");
+            ("edit", root.join("existing"))
+        };
+        let path = target.to_str().expect("path");
+        assert_eq!(field("/subject/type"), "tool_call");
+        assert_eq!(field("/subject/toolCall/name"), tool);
+        assert_eq!(field("/subject/toolCall/kind"), "edit");
+        assert_eq!(field("/subject/toolCall/locations/0/path"), path);
+        assert!(request.title.contains(path));
+        assert_eq!(field("/options/0/kind"), "allow_once");
+        assert_eq!(field("/options/0/optionId"), "allow_once");
+        assert_eq!(field("/options/1/kind"), "reject_once");
+        assert_eq!(field("/options/1/optionId"), "reject_once");
+        assert!(requests.insert(call.to_owned(), responder).is_none());
+    }
+    requests
+}
+
+/// Each sibling waits for its own decision; resuming clients can settle either one.
+#[tokio::test]
+async fn external_file_approvals_resume_and_settle_independently() {
+    let root = tempfile::tempdir().expect("root");
+    let root = root.path().canonicalize().expect("absolute root");
+    let workspace = root.join("workspace");
+    std::fs::create_dir(&workspace).expect("workspace");
+    std::fs::write(root.join("existing"), "before").expect("existing file");
+    let (_kernel, acp) = server(&root, no_policy());
+    with_client(&acp, async |connection, side| {
+        let session = connection
+            .send_request(wire::NewSessionRequest::new(workspace.clone()))
+            .block_task()
+            .await?
+            .session_id;
+        let run =
+            connection.send_request(prompt(&session, "change external files"));
+        let mut first = file_requests(side, &root).await;
+        // Reattaching on this connection keeps both of its original prompts answerable.
+        connection
+            .send_request(wire::ResumeSessionRequest::new(
+                session.clone(),
+                workspace.clone(),
+            ))
+            .block_task()
+            .await?;
+        assert!(!root.join("new").exists());
+        assert_eq!(
+            std::fs::read_to_string(root.join("existing")).expect("file"),
+            "before"
+        );
+        with_client(&acp, async |other, other_side| {
+            other
+                .send_request(wire::ResumeSessionRequest::new(
+                    session.clone(),
+                    workspace.clone(),
+                ))
+                .block_task()
+                .await?;
+            let mut second = file_requests(other_side, &root).await;
+            first
+                .remove("call-edit")
+                .expect("edit")
+                .respond(selected("reject_once"))?;
+            tokio::time::timeout(
+                WAIT,
+                second["call-edit"].cancellation().cancelled(),
+            )
+            .await
+            .expect("reject withdraws other edit prompt");
+            assert!(!root.join("new").exists());
+            second
+                .remove("call-write")
+                .expect("write")
+                .respond(selected("allow_once"))?;
+            tokio::time::timeout(
+                WAIT,
+                first["call-write"].cancellation().cancelled(),
+            )
+            .await
+            .expect("allow withdraws other write prompt");
+            Ok(())
+        })
+        .await;
+        run.block_task().await?;
+        wait_idle(&mut side.updates).await;
+        assert!(matches!(
+            side.asked.try_recv(),
+            Err(mpsc::error::TryRecvError::Empty)
+        ));
+        assert_eq!(
+            std::fs::read_to_string(root.join("existing")).expect("file"),
+            "before"
+        );
+        assert_eq!(
+            std::fs::read_to_string(root.join("new/target")).expect("written"),
+            "written"
+        );
+        Ok(())
+    })
+    .await;
+}
+
+/// A client that cannot present either permission must release the Run without mutating files.
+#[tokio::test]
+async fn file_permission_rpc_errors_finish_the_run_without_writing() {
+    let temp = tempfile::tempdir().expect("root");
+    let root = temp.path().canonicalize().expect("absolute root");
+    let workspace = root.join("workspace");
+    std::fs::create_dir(&workspace).expect("workspace");
+    std::fs::write(root.join("existing"), "before").expect("original text");
+    let (_, acp) = server(&root, no_policy());
+    with_client(&acp, async |connection, side| {
+        let session = connection
+            .send_request(wire::NewSessionRequest::new(workspace))
+            .block_task()
+            .await?
+            .session_id;
+        connection
+            .send_request(prompt(&session, "change external files"))
+            .block_task()
+            .await?;
+        let mut pending = file_requests(side, &root).await;
+        pending
+            .remove("call-write")
+            .expect("write")
+            .respond_with_error(
+                agent_client_protocol::Error::method_not_found(),
+            )?;
+        pending
+            .remove("call-edit")
+            .expect("edit")
+            .respond_with_error(
+                agent_client_protocol::Error::invalid_params(),
+            )?;
+        let failed = next_matching(&mut side.updates, |update| {
+            is_tool_update(update, "call-write") && update["status"] == "failed"
+        })
+        .await;
+        let reason = failed["rawOutput"]["blocks"][0]["text"]
+            .as_str()
+            .expect("tool error");
+        assert!(
+            reason.contains(
+                "No attached client could process the permission request"
+            ),
+            "{reason}"
+        );
+        wait_idle(&mut side.updates).await;
+        assert!(!root.join("new").exists());
+        assert_eq!(
+            std::fs::read_to_string(root.join("existing")).expect("file"),
+            "before"
+        );
+        Ok(())
+    })
+    .await;
+}
+
+/// Another attached client can still authorize one request when both clients fail the other.
+#[tokio::test]
+async fn file_permission_rpc_errors_preserve_other_clients_answers() {
+    let temp = tempfile::tempdir().expect("root");
+    let root = temp.path().canonicalize().expect("absolute root");
+    let workspace = root.join("workspace");
+    std::fs::create_dir(&workspace).expect("workspace");
+    std::fs::write(root.join("existing"), "before").expect("original text");
+    let (_, acp) = server(&root, no_policy());
+    with_client(&acp, async |first, first_side| {
+        let session = first
+            .send_request(wire::NewSessionRequest::new(workspace.clone()))
+            .block_task()
+            .await?
+            .session_id;
+        let (attached, ready) = tokio::sync::oneshot::channel();
+        let slow_client = with_client(&acp, async |second, second_side| {
+            second
+                .send_request(wire::ResumeSessionRequest::new(
+                    session.clone(),
+                    workspace,
+                ))
+                .block_task()
+                .await?;
+            attached.send(()).expect("signal attachment");
+            let mut others = file_requests(second_side, &root).await;
+            others.remove("call-edit").expect("edit")
+                .respond_with_error(agent_client_protocol::Error::invalid_params())?;
+            // One sibling has now failed on both clients; the other still accepts an answer.
+            next_matching(&mut second_side.updates, |update| {
+                is_tool_update(update, "call-edit") && update["status"] == "failed"
+            }).await;
+            others.remove("call-write").expect("write").respond(selected("allow_once"))?;
+            wait_idle(&mut second_side.updates).await;
+            Ok(())
+        });
+        tokio::pin!(slow_client);
+        tokio::select! {
+            () = &mut slow_client => panic!("client finished before attachment"),
+            attached = ready => attached.expect("client attached"),
+        }
+        // Pause the entire second connection driver before it can dispatch either permission.
+        first.send_request(prompt(&session, "change external files")).block_task().await?;
+        for (_, responder) in file_requests(first_side, &root).await {
+            responder.respond_with_error(agent_client_protocol::Error::method_not_found())?;
+        }
+        // This request follows the two error replies on the first connection.
+        first.send_request(wire::ListSessionsRequest::new()).block_task().await?;
+        slow_client.await;
+        assert_eq!(std::fs::read_to_string(root.join("new/target")).expect("written"), "written");
+        assert_eq!(std::fs::read_to_string(root.join("existing")).expect("file"), "before");
+        Ok(())
+    })
+    .await;
+}
+
+/// Dropping the transport with permissions in flight lets a newly attached client answer them.
+#[tokio::test]
+async fn file_permissions_survive_disconnect_and_can_be_approved_after_resume()
+{
+    let temp = tempfile::tempdir().expect("root");
+    let root = temp.path().canonicalize().expect("absolute root");
+    let workspace = root.join("workspace");
+    std::fs::create_dir(&workspace).expect("workspace");
+    std::fs::write(root.join("existing"), "before").expect("original text");
+    let (_, acp) = server(&root, no_policy());
+    let mut disconnected = None;
+    with_client(&acp, async |connection, side| {
+        let session = connection
+            .send_request(wire::NewSessionRequest::new(workspace.clone()))
+            .block_task()
+            .await?
+            .session_id;
+        connection
+            .send_request(prompt(&session, "change external files"))
+            .block_task()
+            .await?;
+        // Keeping the unanswered handles alive prevents their drop from sending an RPC error.
+        disconnected = Some((session, file_requests(side, &root).await));
+        Ok(())
+    })
+    .await;
+    let (session, _old_requests) = disconnected.expect("disconnected session");
+    with_client(&acp, async |connection, side| {
+        connection
+            .send_request(wire::ResumeSessionRequest::new(session, workspace))
+            .block_task()
+            .await?;
+        for (_, responder) in file_requests(side, &root).await {
+            responder.respond(selected("allow_once"))?;
+        }
+        wait_idle(&mut side.updates).await;
+        assert_eq!(
+            std::fs::read_to_string(root.join("new/target")).expect("written"),
+            "written"
+        );
+        assert_eq!(
+            std::fs::read_to_string(root.join("existing")).expect("file"),
+            "after"
+        );
+        Ok(())
+    })
+    .await;
+}
+
+/// The Never policy allows both external tools to finish without an ACP permission request.
+#[tokio::test]
+async fn never_policy_runs_external_file_changes_without_a_prompt() {
+    let root = tempfile::tempdir().expect("root");
+    let workspace = root.path().join("workspace");
+    let existing = root.path().join("existing");
+    std::fs::create_dir(&workspace).expect("workspace");
+    std::fs::write(&existing, "before").expect("original text");
+    let (_, acp) = server_with_approval(
+        root.path(),
+        no_policy(),
+        config::AskForApproval::Never,
+    );
+    with_client(&acp, async |connection, side| {
+        let session = connection
+            .send_request(wire::NewSessionRequest::new(workspace))
+            .block_task()
+            .await?
+            .session_id;
+        connection
+            .send_request(prompt(&session, "change external files"))
+            .block_task()
+            .await?;
+        wait_idle(&mut side.updates).await;
+        assert!(matches!(
+            side.asked.try_recv(),
+            Err(mpsc::error::TryRecvError::Empty)
+        ));
+        assert_eq!(
+            std::fs::read_to_string(&existing).expect("edited"),
+            "after"
+        );
+        assert_eq!(
+            std::fs::read_to_string(root.path().join("new/target"))
+                .expect("written"),
+            "written"
+        );
+        Ok(())
+    })
+    .await;
+}
+
 /// Builds a client answer that selects one option.
 fn selected(option: &str) -> wire::RequestPermissionResponse {
     wire::RequestPermissionResponse::new(
@@ -987,6 +1336,48 @@ fn selected(option: &str) -> wire::RequestPermissionResponse {
             wire::SelectedPermissionOutcome::new(option),
         ),
     )
+}
+
+/// Dismissal and an option belonging to plan approval both leave file mutations unauthorized.
+#[tokio::test]
+async fn dismissed_and_unknown_file_permissions_preserve_both_targets() {
+    let temp = tempfile::tempdir().expect("root");
+    let root = temp.path().canonicalize().expect("absolute root");
+    let workspace = root.join("workspace");
+    std::fs::create_dir(&workspace).expect("workspace");
+    std::fs::write(root.join("existing"), "before").expect("original text");
+    let (_, acp) = server(&root, no_policy());
+    with_client(&acp, async |connection, side| {
+        let session = connection
+            .send_request(wire::NewSessionRequest::new(workspace))
+            .block_task()
+            .await?
+            .session_id;
+        connection
+            .send_request(prompt(&session, "change external files"))
+            .block_task()
+            .await?;
+        let mut pending = file_requests(side, &root).await;
+        pending
+            .remove("call-write")
+            .expect("write")
+            .respond(selected("approve"))?;
+        pending.remove("call-edit").expect("edit").respond(
+            wire::RequestPermissionResponse::new(
+                wire::RequestPermissionOutcome::Cancelled(
+                    wire::CancelledPermissionOutcome::new(),
+                ),
+            ),
+        )?;
+        wait_idle(&mut side.updates).await;
+        assert!(!root.join("new").exists());
+        assert_eq!(
+            std::fs::read_to_string(root.join("existing")).expect("file"),
+            "before"
+        );
+        Ok(())
+    })
+    .await;
 }
 
 /// Starts plan mode and submits a plan, returning the Session.

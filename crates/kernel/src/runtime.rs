@@ -146,6 +146,9 @@ pub enum KernelError {
     /// The elicitation was already answered, cancelled, or never pending.
     #[error("MCP elicitation is already resolved: {0}")]
     ElicitationResolved(String),
+    /// The file approval was already answered, cancelled, or never pending.
+    #[error("file approval is already resolved: {0}")]
+    FileApprovalResolved(String),
     /// The plan approval was already answered, withdrawn, or never pending.
     #[error("plan approval is already resolved: {0}")]
     PlanApprovalResolved(String),
@@ -235,6 +238,9 @@ pub struct KernelFactory {
     /// Controls whether effective Skills are listed in System Prompts.
     #[builder(default = true)]
     include_skill_instructions: bool,
+    /// Effective application policy for ordinary tool permission requests.
+    #[builder(default)]
+    approval_policy: config::AskForApproval,
     /// Controls whether sequential Turns are unlimited or explicitly bounded.
     #[builder(default)]
     max_turns: TurnLimit,
@@ -356,6 +362,7 @@ impl KernelFactory {
             .mcp_factory(self.mcp_factory)
             .skill_factory(self.skill_factory)
             .include_skill_instructions(self.include_skill_instructions)
+            .approval_policy(self.approval_policy)
             .max_turns(self.max_turns)
             .when_busy(self.when_busy)
             .subagent_max_agents(self.subagent_max_agents)
@@ -395,6 +402,7 @@ pub struct Kernel {
     #[builder(default)]
     skill_factory: Option<Arc<dyn skill::SkillFactory>>,
     include_skill_instructions: bool,
+    approval_policy: config::AskForApproval,
     max_turns: TurnLimit,
     #[builder(default)]
     when_busy: WhenBusy,
@@ -685,6 +693,9 @@ struct Session {
     extensions: SessionExtensions,
     tools: Arc<SessionToolState>,
     model: SessionModelState,
+    /// Pending external file mutations, shared by every attached client.
+    #[builder(default)]
+    file_approvals: tools::SessionFileApprovals,
     /// Plan-mode state that settings changes and tool batches consult.
     plan: plan::SessionPlanState,
     /// Background command sessions; `None` when shell tools are disabled.

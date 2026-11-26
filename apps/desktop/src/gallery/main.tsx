@@ -4,6 +4,7 @@ import type { JSX } from "nsh/jsx-runtime";
 import { Button, IconButton } from "../ui/button";
 import type { ButtonVariant } from "../ui/button";
 import { CopyButton } from "../ui/copy";
+import { configureDesktopFonts } from "../ui/fonts";
 import { confirm, Dialog, Sheet } from "../ui/dialog";
 import { MessageBubble } from "../ui/bubble";
 import { Disclosure } from "../ui/disclosure";
@@ -276,4 +277,5 @@ function Gallery() {
   );
 }
 
+configureDesktopFonts();
 mount(Gallery);

@@ -5,9 +5,10 @@ use protocol::{
 };
 use serde::Deserialize;
 use similar::{ChangeTag, TextDiff};
+use tokio::io::AsyncReadExt as _;
 use unicode_normalization::UnicodeNormalization as _;
 
-use super::mutation::with_file_mutation;
+use super::mutation::FileMutation;
 use super::path::ResolvedPath;
 use crate::{AgentTool, ToolError, ToolExecutionContext};
 
@@ -265,73 +266,85 @@ impl AgentTool for EditTool {
     ) -> Result<ToolResult, ToolError> {
         let arguments = EditArguments::try_from(&call)?;
         arguments.validate()?;
-        let absolute = ResolvedPath::new(&arguments.path, &context.cwd)?;
-        with_file_mutation(absolute.as_path(), || async {
-            context.ensure_active()?;
-            let bytes =
-                tokio::fs::read(absolute.as_path()).await.map_err(|error| {
-                    ToolError::Execution {
-                        tool: call.name.clone(),
-                        message: format!(
-                            "Could not edit file: {}. {}.",
-                            arguments.path,
-                            IoDiagnostic::from(&error)
-                        ),
-                    }
-                })?;
-            context.ensure_active()?;
-            let raw = String::from_utf8_lossy(&bytes);
-            let (bom, content) = raw
-                .strip_prefix('\u{feff}')
-                .map_or(("", raw.as_ref()), |content| ("\u{feff}", content));
-            let line_ending = if content.find("\r\n").is_some_and(|crlf| {
-                content.find('\n').is_some_and(|lf| crlf < lf)
-            }) {
-                "\r\n"
-            } else {
-                "\n"
-            };
-            let normalized = content.replace("\r\n", "\n").replace('\r', "\n");
-            let (base, edited) =
-                apply_edits(&normalized, &arguments.edits, &arguments.path)?;
-            context.ensure_active()?;
-            let restored = if line_ending == "\r\n" {
-                edited.replace('\n', "\r\n")
-            } else {
-                edited.clone()
-            };
-            tokio::fs::write(
-                absolute.as_path(),
-                format!("{bom}{restored}").as_bytes(),
-            )
-            .await
-            .map_err(|error| ToolError::Execution {
+        let target =
+            FileMutation::prepare(&arguments.path, &call, context).await?;
+        let _guard = target.lock().await;
+        context.ensure_active()?;
+        let read_error = |error: std::io::Error| {
+            tracing::warn!(
+                "could not read edit target {}: {}",
+                target.path.display(),
+                error
+            );
+            ToolError::Execution {
                 tool: call.name.clone(),
-                message: error.to_string(),
+                message: format!(
+                    "Could not edit file: {}. {}.",
+                    arguments.path,
+                    IoDiagnostic::from(&error)
+                ),
+            }
+        };
+        // Retain the source descriptor while matching the edit so the save can identify the snapshot.
+        let mut file = target.open_edit().await.map_err(read_error)?;
+        let mut bytes = Vec::new();
+        file.read_to_end(&mut bytes).await.map_err(read_error)?;
+        context.ensure_active()?;
+        let raw = String::from_utf8_lossy(&bytes);
+        let (bom, content) = raw
+            .strip_prefix('\u{feff}')
+            .map_or(("", raw.as_ref()), |content| ("\u{feff}", content));
+        let line_ending = if content
+            .find("\r\n")
+            .is_some_and(|crlf| content.find('\n').is_some_and(|lf| crlf < lf))
+        {
+            "\r\n"
+        } else {
+            "\n"
+        };
+        let normalized = content.replace("\r\n", "\n").replace('\r', "\n");
+        let (base, edited) =
+            apply_edits(&normalized, &arguments.edits, &arguments.path)?;
+        context.ensure_active()?;
+        let restored = if line_ending == "\r\n" {
+            edited.replace('\n', "\r\n")
+        } else {
+            edited.clone()
+        };
+        target
+            .save(Some(file), format!("{bom}{restored}"))
+            .await
+            .map_err(|error| {
+                tracing::warn!(
+                    "could not save edit target {}: {}",
+                    target.path.display(),
+                    error
+                );
+                ToolError::Execution {
+                    tool: call.name.clone(),
+                    message: error.to_string(),
+                }
             })?;
-            context.ensure_active()?;
-            let absolute_path =
-                absolute.as_path().to_string_lossy().into_owned();
-            let diff = EditDiff::between(&absolute_path, &base, &edited);
-            Ok(ToolResult::builder()
-                .tool_call_id(call.tool_call_id)
-                .blocks(vec![ContentBlock::Text {
-                    text: format!(
-                        "Successfully replaced {} block(s) in {}.",
-                        arguments.edits.len(),
-                        arguments.path
-                    ),
-                }])
-                .is_error(false)
-                .details(ToolResultDetails::Edit {
-                    path: absolute_path,
-                    diff: diff.display,
-                    patch: diff.patch,
-                    first_changed_line: diff.first_changed_line,
-                })
-                .build())
-        })
-        .await
+        context.ensure_active()?;
+        let absolute_path = target.path.to_string_lossy().into_owned();
+        let diff = EditDiff::between(&absolute_path, &base, &edited);
+        Ok(ToolResult::builder()
+            .tool_call_id(call.tool_call_id)
+            .blocks(vec![ContentBlock::Text {
+                text: format!(
+                    "Successfully replaced {} block(s) in {}.",
+                    arguments.edits.len(),
+                    arguments.path
+                ),
+            }])
+            .is_error(false)
+            .details(ToolResultDetails::Edit {
+                path: absolute_path,
+                diff: diff.display,
+                patch: diff.patch,
+                first_changed_line: diff.first_changed_line,
+            })
+            .build())
     }
 }
 

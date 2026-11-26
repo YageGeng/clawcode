@@ -52,9 +52,12 @@ Example:
 
 ```toml
 active_model = "deepseek/deepseek-v4-pro"
-# Approval prompts are not implemented yet: tools always run without asking.
-# Any value other than "yolo" logs a startup warning.
-approval = "yolo"
+# Ask once before built-in write or edit changes a file outside the Session workspace.
+# A subagent that needs such a change must ask its parent to perform it.
+# On Linux, saving in this mode requires write access to the parent directory.
+# Other hard links to the same file keep their original contents.
+# Unattended clients can set this to "never" to allow those changes automatically.
+approval_policy = "on-request"
 
 [[providers]]
 id = "deepseek"

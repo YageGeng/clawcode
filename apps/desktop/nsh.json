@@ -6,6 +6,9 @@
   "rust": "ext/backend",
   "theme": "theme.json",
   "appearance": "system",
+  "application": {
+    "quitMode": "lastWindowClosed"
+  },
   "window": {
     "title": "Clawcode",
     "defaultSize": { "width": 1200, "height": 800 },
@@ -13,6 +16,8 @@
     "restoreBounds": true
   },
   "capabilities": {
+    "application": true,
+    "clipboard": true,
     "process": {
       "env": ["CLAW_CONFIG"]
     }

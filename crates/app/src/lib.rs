@@ -131,15 +131,16 @@ impl ApplicationFactory {
     /// Builds provider, tool, MCP, skill, store, extension, and kernel factories.
     pub async fn build(self) -> Result<Application, ApplicationError> {
         let snapshot = self.config.current();
-        // ponytail: approval prompts are not implemented, so every tool runs
-        // without asking whatever the policy says; wire ACP permission requests
-        // into tool execution before honouring it.
-        let approval = snapshot.effective_approval_policy();
-        if approval != config::AskForApproval::Never {
-            tracing::warn!(
-                "approval policy {:?} is not enforced yet: tools run without asking for permission",
-                approval
-            );
+        let approval_policy = snapshot.effective_approval_policy();
+        match approval_policy {
+            config::AskForApproval::OnRequest => tracing::info!(
+                "approval is required for built-in write and edit outside the Session workspace"
+            ),
+            config::AskForApproval::Never => {}
+            unsupported => tracing::warn!(
+                "approval policy {:?} is not implemented for ordinary tools; they run without permission prompts",
+                unsupported
+            ),
         }
         // Resolve generated extension code before external factories so an
         // unavailable runtime selection fails startup without side effects.
@@ -236,6 +237,7 @@ impl ApplicationFactory {
         let kernel = KernelFactory::builder()
             .model_factory(model_factory)
             .tool_factory(Arc::new(builtin_tools))
+            .approval_policy(approval_policy)
             .store_factory(Arc::clone(&store_factory) as Arc<dyn StoreFactory>)
             .state(state.as_ref().map(Arc::clone))
             .extension_factory(Arc::new(extension_factory))

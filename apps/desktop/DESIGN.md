@@ -20,7 +20,7 @@ interaction patterns, never its logo, icons or brand elements.
 
 ## Platforms
 
-Desktop family: Linux (GTK 4), macOS and Windows. Pointer and keyboard first: hover on everything pressable, visible
+Desktop family: Linux (Wayland, GTK 4), macOS and Windows. Pointer and keyboard first: hover on everything pressable, visible
 focus rings, Escape dismisses the topmost surface, tooltips on icon-only controls. Mobile (as a remote control later)
 and TUI keep the components' semantics and change presentation only.
 
@@ -211,8 +211,21 @@ linux` against the scripted host entries), light and dark, English and Chinese.
 | Language | Fixed: "This computer" was the host's data name; the local host now reads `shell.thisComputer` ("这台电脑"). Chinese copy fits every control |
 | Composer | The field grows to 8 lines and stops. Caret-follow past 8 lines and Return-to-send are checked by hand: on Wayland the test agent inserts text and line breaks into the buffer (no XTest), bypassing the key path and the view's scroll-to-caret |
 
-Found, not app code: under an English `LC_CTYPE`, a fontconfig rule common on Chinese desktops (lang `en` and a family
-containing "Noto Sans CJK" → prepend "Noto Sans") blanks every CJK glyph in NSH text. NSH 0.6.1's Linux backend shapes
-on the engine thread, then reloads each run's font on the main thread by its description; fontconfig resolves "Noto
-Sans CJK SC" to Noto Sans there, and the CJK glyph ids miss. Native text inputs are unaffected. Under a Chinese locale
-the same screens draw correctly.
+On Linux, NSH 0.7.1 shapes text and reloads its font for drawing on a second thread. A fontconfig substitution can
+resolve that description to a different face. On the affected English-locale desktop, this left Chinese table headers
+and prose blank while Latin text remained legible. At startup the app probes the system sans and monospace faces
+independently. If a face fails the round trip, the app uses the first installed fallback that covers the sample Han
+characters and punctuation and reloads as the same face. To check the result visually from this directory, run the
+following under the affected locale and inspect the table headers, mixed-language body and inline Chinese code.
+
+```sh
+GDK_BACKEND=wayland LC_ALL=en_US.UTF-8 nsh test tests/entries/markdown-cjk.tsx --target linux <<'STEPS'
+await app.setViewport(620, 340)
+await app.screenshot("target/markdown-cjk-verified.png")
+STEPS
+```
+
+With NSH 0.7.1 on Wayland, the title bar uses GTK's native window buttons with 32-point hit areas and line icons.
+Light and dark window captures covered the resting state. A Wayland window using the same controls and stylesheet
+confirmed maximize, restore, minimize and close. In a separate KWin Wayland session, fcitx5 Pinyin received key
+events in the desktop composer. The first Enter committed the preedit to the draft and the next Enter sent it.
