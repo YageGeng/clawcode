@@ -208,6 +208,11 @@ impl fmt::Display for AcpExtensionMethod {
 }
 
 impl AcpExtensionMethod {
+    /// Whether this operation reads provider sign-in state or advances a host credential flow.
+    pub const fn requires_host_credentials(self) -> bool {
+        matches!(self, Self::AuthStatus | Self::McpOAuthContinue)
+    }
+
     /// Returns the static JSON-RPC method name for registration and dispatch.
     #[must_use]
     pub const fn as_str(self) -> &'static str {

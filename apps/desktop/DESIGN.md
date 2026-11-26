@@ -229,3 +229,19 @@ With NSH 0.7.1 on Wayland, the title bar uses GTK's native window buttons with 3
 Light and dark window captures covered the resting state. A Wayland window using the same controls and stylesheet
 confirmed maximize, restore, minimize and close. In a separate KWin Wayland session, fcitx5 Pinyin received key
 events in the desktop composer. The first Enter committed the preedit to the draft and the next Enter sent it.
+
+## Motion inventory: remote control
+
+| Change | Motion | Reduced motion |
+| --- | --- | --- |
+| Open the computer menu or select a paired computer | Existing menu grows from its trigger. The selected computer's workspace and sessions appear together. | Instant |
+| Open sharing settings, pairing form, invitation or confirmation | One desktop dialog fades in. An incoming request takes focus and names this computer as the target. Closing returns to the preceding view. | Instant |
+| Enable sharing, approve, disconnect, revoke or try again | The pressed control uses its normal wash and press scale. Pending actions disable repeats. Connection counts, device rows and errors update in place. | Instant, status text remains visible |
+| Show a pairing code | The QR appears at full contrast with a quiet zone. Its expiration is shown in text. Copy uses the shared clipboard feedback. | Same |
+| Lose a remote connection | The selected computer shows its offline reason and retry action immediately. A cached conversation stays readable. | Same |
+
+### R1 Linux check record
+
+Checked the production remote-control dialog on GTK/Wayland at 800 × 560 in English light mode and Simplified Chinese dark mode. Both languages fit the form, use the existing control and dialog radii, and align the name, switch, and device list to the same left edge. The empty, connected, disconnected, and revoked states have text or an action that identifies them. A camera decoder read the invitation directly from the rendered QR at the minimum window size.
+
+Escape now returns from the invitation to the device list, then to Settings. The real GTK input path and a focused headless regression test cover that sequence. The two-window check exercised pairing, permission prompts, and revocation. Still images cover layout, colors, text, and resting states. Screen-reader narration, reduced-motion playback, and pointer hover/press timing have not been observed.

@@ -828,17 +828,22 @@ impl AcpServerFactory {
                                 responder: Responder<wire::InitializeResponse>,
                                 _connection: V2ConnectionTo<Client>| {
                     let projections = Arc::clone(&context.projections);
-                    let auth_methods = context
-                        .kernel
-                        .login_methods()
-                        .into_iter()
-                        .map(|method| {
-                            wire::AuthMethod::Agent(wire::AuthMethodAgent::new(
-                                method.id,
-                                method.name,
-                            ))
-                        })
-                        .collect();
+                    let transport = context.transport;
+                    let auth_methods = if transport == crate::AcpTransportKind::Remote {
+                        Vec::new()
+                    } else {
+                        context
+                            .kernel
+                            .login_methods()
+                            .into_iter()
+                            .map(|method| {
+                                wire::AuthMethod::Agent(wire::AuthMethodAgent::new(
+                                    method.id,
+                                    method.name,
+                                ))
+                            })
+                            .collect()
+                    };
                     context.watchers.elicitations.negotiated(ElicitationModes::from(
                         request.capabilities.elicitation.as_ref(),
                     ));
@@ -924,6 +929,8 @@ impl AcpServerFactory {
                         AcpExtensionMethod::TrajectoryContent,
                     ]
                     .into_iter()
+                    .filter(|method| transport != crate::AcpTransportKind::Remote
+                        || !method.requires_host_credentials())
                     .map(|method| serde_json::Value::String(method.to_string()))
                     .collect::<Vec<_>>();
                     let mut product_meta = serde_json::Map::from_iter([(
@@ -1446,6 +1453,10 @@ impl AcpServerFactory {
                     let operation = context.transport.request_log(&responder, &request);
                     operation.start();
                     let requested = request.method_id.to_string();
+                    if let Err(error) = context.transport.require_host() {
+                        operation.fail(&error);
+                        return Err(error);
+                    }
                     let Some(method) = context
                         .kernel
                         .login_methods()
@@ -1756,6 +1767,14 @@ impl AcpServerFactory {
                         &responder,
                         request.parameters(),
                     );
+                    // Reject before detaching slow status calls, while the handler still owns the reply.
+                    if request.method.requires_host_credentials()
+                        && let Err(error) = context.transport.require_host()
+                    {
+                        operation.start();
+                        operation.fail(&error);
+                        return responder.respond_with_error(error);
+                    }
                     let slow = request.is_slow();
                     let tasks = connection.clone();
                     // The extension dispatcher covers every product method;

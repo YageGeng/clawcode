@@ -70,3 +70,7 @@ range), so n0 picked `usw1-1.relay.n0.iroh.link` as the home relay.
 No item failed. Item 1 passed on Linux only, and item 2 only on one machine: macOS and Windows builds and a
 two-device cross-NAT run stay open for R1's acceptance. The probe crate, the extension probe module and the probe
 pages were deleted after these runs.
+
+## R1 follow-up on Wayland
+
+The production host and controller passed a two-window pairing, remote conversation, file approval and revocation run on Linux. A separate relay-only connection carried a synthetic frame through the public relay. Results for profile isolation, reconnect after local backend failure, timing and the remaining two-device cross-NAT check are in the [R1 acceptance record](../../docs/superpowers/plans/2026-11-25-desktop-nsh-r1.md).

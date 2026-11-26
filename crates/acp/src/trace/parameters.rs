@@ -41,6 +41,8 @@ fn summarize_image_data(data: &str) -> String {
 /// Parameters retained only when ACP debug diagnostics are enabled.
 #[derive(Clone, Default)]
 pub(super) enum AcpLogParameters {
+    /// Remote links omit request bodies and payload-bearing error diagnostics at every level.
+    Private,
     /// Parameter serialization is unnecessary at the active log level.
     #[default]
     Disabled,
@@ -72,7 +74,7 @@ impl AcpLogParameters {
     /// Writes one readable parameter event without changing operation results.
     pub(super) fn log(&self, description: &str) {
         match self {
-            Self::Disabled => {}
+            Self::Disabled | Self::Private => {}
             Self::Json(parameters) => tracing::debug!(
                 target: ACP_TRACE_TARGET,
                 "parameters for {}: {}",

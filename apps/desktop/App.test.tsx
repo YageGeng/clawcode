@@ -44,3 +44,15 @@ test("startup_failure_reaches_the_screen", async () => {
   });
   await app.waitFor("text:Backend failed to start: config file not found: /nowhere/config.toml");
 });
+
+test("remote_pairing_is_reachable_when_the_local_backend_fails", async () => {
+  const app = await open("./App.tsx", {
+    ...DESKTOP,
+    modules: { "clawcode-backend": { "Backend.start": () => { throw new Error("local backend unavailable"); } } },
+  });
+  await app.waitFor("text:Backend failed to start: local backend unavailable");
+  await app.press("text:This computer");
+  await app.press("text:Add remote computer");
+  await app.waitFor("label:Pairing code");
+  await app.waitFor("text:Pair");
+});

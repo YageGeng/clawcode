@@ -29,6 +29,8 @@ pub enum AcpTransportKind {
     Http,
     /// ACP connection inside the same process, such as the desktop client.
     InProcess,
+    /// ACP frames from a device authenticated by the desktop host.
+    Remote,
 }
 
 impl fmt::Display for AcpTransportKind {
@@ -38,6 +40,7 @@ impl fmt::Display for AcpTransportKind {
             Self::Stdio => formatter.write_str("stdio"),
             Self::Http => formatter.write_str("http"),
             Self::InProcess => formatter.write_str("in-process"),
+            Self::Remote => formatter.write_str("remote"),
         }
     }
 }
@@ -62,6 +65,27 @@ impl From<&str> for AcpRequestKind {
 }
 
 impl AcpTransportKind {
+    /// Keeps interactive credential management on the machine that owns the provider.
+    pub(crate) fn require_host(
+        self,
+    ) -> Result<(), agent_client_protocol::Error> {
+        if self == Self::Remote {
+            return Err(agent_client_protocol::Error::new(
+                agent_client_protocol::ErrorCode::METHOD_NOT_FOUND,
+                "Credential management is available only on the host computer.",
+            ));
+        }
+        Ok(())
+    }
+
+    /// Remote link diagnostics record method and outcome without retaining the frame body.
+    fn parameters<T: Serialize + ?Sized>(self, value: &T) -> AcpLogParameters {
+        match self {
+            Self::Remote => AcpLogParameters::Private,
+            _ => AcpLogParameters::capture(value),
+        }
+    }
+
     /// Starts the log of one JSON-RPC request received over this transport.
     pub(crate) fn request_log<T, P>(
         &self,
@@ -79,7 +103,7 @@ impl AcpTransportKind {
                 responder.id(),
                 self
             ),
-            AcpLogParameters::capture(parameters),
+            self.parameters(parameters),
             AcpRequestKind::from(responder.method()),
         )
     }
@@ -95,7 +119,7 @@ impl AcpTransportKind {
     {
         AcpRequestLog::new(
             format!("ACP notification {} over {}", method, self),
-            AcpLogParameters::capture(parameters),
+            self.parameters(parameters),
             AcpRequestKind::from(method),
         )
     }
@@ -165,6 +189,15 @@ impl AcpRequestLog {
     where
         E: fmt::Display,
     {
+        // Validation errors may quote the original request in their message or data.
+        if matches!(self.identity.parameters, AcpLogParameters::Private) {
+            tracing::warn!(
+                "failed {} in {} ms",
+                self.identity.description,
+                self.started_at.elapsed().as_millis()
+            );
+            return;
+        }
         tracing::warn!(
             "failed {} in {} ms: {}",
             self.identity.description,

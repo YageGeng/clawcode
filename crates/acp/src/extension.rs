@@ -74,7 +74,7 @@ impl JsonRpcNotification for AcpMcpUpdateNotification {}
 /// One product-scoped ACP request that preserves method-specific JSON parameters.
 #[derive(Debug, Clone)]
 pub(crate) struct AcpExtensionRequest {
-    method: AcpExtensionMethod,
+    pub(crate) method: AcpExtensionMethod,
     parameters: serde_json::Value,
 }
 

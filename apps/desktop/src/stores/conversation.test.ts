@@ -37,6 +37,63 @@ test("opening_a_session_replays_its_transcript", async () => {
   expect(transcript(host, s1)).toBe(2);
 });
 
+test("a_partial_replay_cannot_replace_the_last_complete_transcript_when_the_link_fails", async () => {
+  const agent = new ScriptedAgent([{ sessionId: "s1", cwd: "/work/a" }]);
+  agent.replays.set("s1", [agent.userMessage("s1", "u1", "Original")]);
+  const host = await hostOver(agent);
+  await host.openSession(s1);
+  const cached = host.session(s1);
+  const send = agent.transport.send.bind(agent.transport);
+  let replayStarted = false;
+  agent.transport.send = (line) => {
+    if (JSON.parse(line).method === "session/resume") {
+      agent.push(agent.userMessage("s1", "partial", "Partial replay"));
+      replayStarted = true;
+    } else {
+      send(line);
+    }
+  };
+  const replay = host.openSession(s1).then(() => "unexpected success", () => "interrupted");
+  await until(() => replayStarted);
+  expect(host.session(s1)).toEqual(cached);
+  agent.transport.end("offline");
+  expect(await replay).toBe("interrupted");
+  expect(host.session(s1)).toEqual(cached);
+});
+
+test("replay_publishes_history_once_and_keeps_live_run_state_visible", async () => {
+  const s2 = "s2" as SessionId;
+  const agent = new ScriptedAgent([{ sessionId: s1, cwd: "/work" }, { sessionId: s2, cwd: "/other" }]);
+  agent.replays.set(s1, [agent.userMessage(s1, "saved", "Original")]);
+  const host = await hostOver(agent);
+  await host.openSession(s1);
+  const savedHistory = host.session(s1)!.transcript;
+  const directory = host.workspace().sessionWorkspaces;
+
+  // Hold just the resume reply so live state and partial history arrive on the same wire.
+  let requestId: number | undefined;
+  const send = agent.transport.send.bind(agent.transport);
+  agent.transport.send = (line) => {
+    const frame = JSON.parse(line);
+    if (frame.method === "session/resume") requestId = frame.id;
+    else send(line);
+  };
+  const replay = host.openSession(s1);
+  await until(() => requestId !== undefined);
+  agent.push(agent.userMessage(s1, "replacement", "New history"));
+  expect(host.workspace().sessionWorkspaces).toBe(directory);
+  agent.push(agent.state(s1, "running"));
+  expect(host.running(s1)).toBe(true);
+  expect(host.session(s1)!.running).toBe(true);
+  expect(host.session(s1)!.transcript).toBe(savedHistory);
+  agent.push(agent.agentMessage(s2, "another", "An independent live message"));
+  expect(host.session(s2)!.transcript.length).toBe(1);
+  agent.respond(requestId!, {});
+  await replay;
+  expect([...host.session(s1)!.messages.values()].map((message) => message.text)).toEqual(["New history"]);
+  expect(host.running(s1)).toBe(true);
+});
+
 test("prompt_streams_a_reply", async () => {
   const agent = new ScriptedAgent([{ sessionId: "s1", cwd: "/work/a" }]);
   agent.onPrompt = (call) => {

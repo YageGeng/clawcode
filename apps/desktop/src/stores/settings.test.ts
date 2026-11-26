@@ -23,5 +23,16 @@ test("update_saves_after_debounce", async () => {
   await store.load();
   store.update({ appearance: "dark" });
   await new Promise((resolve) => setTimeout(resolve, 400));
-  expect(await Storage.getItem("settings")).toBe('{"appearance":"dark","language":"system"}');
+  const reopened = createSettingsStore();
+  await reopened.load();
+  expect(reopened.settings().appearance).toBe("dark");
+});
+
+test("appearance_and_language_ignore_legacy_sharing_values", async () => {
+  const store = createSettingsStore();
+  for (const value of [true, "true", false]) {
+    await Storage.setItem("settings", JSON.stringify({ appearance: "dark", language: "en", remoteControlEnabled: value }));
+    await store.load();
+    expect(store.settings()).toEqual({ appearance: "dark", language: "en" });
+  }
 });

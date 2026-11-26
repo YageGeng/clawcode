@@ -1,7 +1,7 @@
 import type { SessionId, SessionUpdateNotification } from "../acp/protocol";
 import { reduceWorkspace, sessionWorkspace } from "./state";
 import type { WorkspaceAction, WorkspaceState } from "./state";
-import { SessionWorkspaceStager } from "./sessionState";
+import { initialSessionWorkspaceState, SessionWorkspaceStager } from "./sessionState";
 import type { SessionWorkspaceState } from "./sessionState";
 import { SessionRecoveryBuffer } from "./recovery";
 import { SessionUpdateDecoder } from "./updateDecoder";
@@ -25,6 +25,8 @@ export class SessionUpdateRouter {
   private readonly store: WorkspaceStoreAccess;
   private readonly refreshes: RouterRefreshes;
   private readonly recovery: SessionRecoveryBuffer;
+  // A replacement history stays private until resume succeeds. Live state still goes to the workspace.
+  private readonly replays = new Map<SessionId, { history: SessionWorkspaceStager; valid: boolean }>();
   private receivedOrder = 0;
 
   /** Creates a router whose state reads and writes use the same store instance. */
@@ -55,7 +57,8 @@ export class SessionUpdateRouter {
             stager = new SessionWorkspaceStager(sessionWorkspace(current, item.sessionId));
             stagers.set(item.sessionId, stager);
           }
-          const entities = stager.snapshot();
+          const history = this.replays.get(item.sessionId)?.history ?? stager;
+          const entities = history.snapshot();
           const decoded = this.decoder.decode(item, entities, ++this.receivedOrder);
           if (decoded.scope === "global") {
             for (const action of decoded.actions) workspaceDraft = reduceWorkspace(workspaceDraft, action);
@@ -67,7 +70,8 @@ export class SessionUpdateRouter {
                 if (child !== undefined && entities.tools.get(action.tool.toolCallId)?.subagentSessionId === undefined
                   && !workspaceDraft.sessions.some((session) => session.sessionId === child)) newChild = true;
               }
-              stager.apply(action);
+              if (action.type === "running/changed") stager.apply(action);
+              else history.apply(action);
             }
           }
           if (decoded.refreshRuntime) refreshRuntime.add(batch.sessionId);
@@ -79,7 +83,11 @@ export class SessionUpdateRouter {
       const committed = this.commitStaged(workspaceDraft, stagers);
       if (committed !== current) this.store.dispatch({ type: "workspace/committed", state: committed });
     } catch (reason: unknown) {
-      for (const sessionId of touchedSessions) this.recovery.requireFullReplay(sessionId);
+      for (const sessionId of touchedSessions) {
+        this.recovery.requireFullReplay(sessionId);
+        const replay = this.replays.get(sessionId);
+        if (replay) replay.valid = false;
+      }
       throw reason;
     }
     for (const sessionId of refreshRuntime) {
@@ -102,8 +110,28 @@ export class SessionUpdateRouter {
     return sessionWorkspaces === undefined ? workspaceDraft : { ...workspaceDraft, sessionWorkspaces };
   }
 
-  /** Forces one Session to recover from a full standard ACP replay. */
-  requireFullReplay(sessionId: SessionId): void {
+  /** Streams a first history immediately, or replaces an existing history only after a complete replay. */
+  async replay(sessionId: SessionId, resume: () => Promise<unknown>): Promise<void> {
     this.recovery.requireFullReplay(sessionId);
+    if (!sessionWorkspace(this.store.getState(), sessionId).transcript.length) {
+      this.store.dispatch({ type: "session/updated", sessionId, action: { type: "transcript/cleared" } });
+      await resume();
+      return;
+    }
+
+    const replay = { history: new SessionWorkspaceStager(initialSessionWorkspaceState), valid: true };
+    this.replays.set(sessionId, replay);
+    try {
+      await resume();
+      if (!replay.valid) throw new Error("Session history replay was incomplete");
+      const state = this.store.getState();
+      const current = state.sessionWorkspaces.get(sessionId);
+      if (!current) return; // A directory refresh removed the Session while resume was pending.
+      const replacement = { ...replay.history.commit(), running: current.running };
+      const sessionWorkspaces = new Map(state.sessionWorkspaces).set(sessionId, replacement);
+      this.store.dispatch({ type: "workspace/committed", state: { ...state, sessionWorkspaces } });
+    } finally {
+      this.replays.delete(sessionId);
+    }
   }
 }

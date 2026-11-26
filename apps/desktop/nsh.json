@@ -19,7 +19,7 @@
     "application": true,
     "clipboard": true,
     "process": {
-      "env": ["CLAW_CONFIG"]
+      "env": ["CLAW_CONFIG", "CLAW_DESKTOP_RELAY"]
     }
   }
 }

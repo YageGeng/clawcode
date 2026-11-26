@@ -14,16 +14,21 @@ export class NativeTransport implements AcpTransport {
   private readonly frameListeners = new Set<(frame: string) => void>();
   private readonly closeListeners = new Set<(reason?: string) => void>();
 
+  /** The local application used to serve authorized remote connections once startup finishes. */
+  get localBackend(): Backend | undefined {
+    return this.closed ? undefined : this.backend;
+  }
+
   /** Starts the backend and begins delivering its frames; rejects with why it could not start. */
   async open(): Promise<void> {
     if (this.backend !== undefined) throw new Error("the backend is already started");
     const backend = await Backend.start();
+    this.backend = backend;
     if (this.closed) {
       // Closed (a connect timeout, the window) while it started: it must not keep running.
-      void backend.shutdown();
+      this.close();
       throw new Error("the connection closed while the backend started");
     }
-    this.backend = backend;
     // `serve` settles when the connection ends: with its error, or null.
     backend.serve((frame) => {
       for (const listener of this.frameListeners) listener(frame);
@@ -35,8 +40,9 @@ export class NativeTransport implements AcpTransport {
 
   /** Sends one frame to the backend. */
   send(frame: string): void {
-    if (this.backend === undefined) throw new Error("the backend is not started");
-    this.backend.send(frame);
+    const backend = this.localBackend;
+    if (backend === undefined) throw new Error("the backend is not started");
+    backend.send(frame);
   }
 
   /** Registers a frame listener. */
@@ -54,9 +60,10 @@ export class NativeTransport implements AcpTransport {
   /** Shuts the backend down in the background; the close listeners hear of it once its frames end. */
   close(): void {
     this.closed = true;
-    const backend = this.backend;
-    this.backend = undefined;
-    void backend?.shutdown();
+    // Keep the native handle until the drain settles so quit can still wait synchronously.
+    void this.backend?.shutdown().catch((error: unknown) => {
+      console.warn(`shutting down the local backend: ${messageOf(error)}`);
+    }).finally(() => { this.backend = undefined; });
   }
 
   /**
@@ -68,7 +75,7 @@ export class NativeTransport implements AcpTransport {
     const backend = this.backend;
     this.backend = undefined;
     if (backend !== undefined && !backend.shutdownNow(QUIT_TIMEOUT_MS)) {
-      console.warn(`the backend did not stop within ${QUIT_TIMEOUT_MS} ms`);
+      console.warn("the local backend could not confirm a complete shutdown before quit");
     }
   }
 

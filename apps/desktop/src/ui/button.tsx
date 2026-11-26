@@ -60,6 +60,7 @@ export function Button(props: ButtonBaseProps & { label: string; icon?: IconName
   const size = () => props.size ?? "md";
   return (
     <BaseButton
+      accessibilityLabel={props.label}
       disabled={props.disabled === true || props.loading === true}
       selected={props.selected === true}
       onPress={props.onPress}

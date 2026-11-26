@@ -32,6 +32,7 @@ export function Checkbox(props: { label: string; checked: boolean; disabled?: bo
 export function Switch(props: { label: string; checked: boolean; disabled?: boolean; onChange: (checked: boolean) => void }) {
   return (
     <BaseSwitch
+      accessibilityLabel={props.label}
       checked={props.checked}
       disabled={props.disabled === true}
       onChange={(event) => props.onChange(event.checked)}

@@ -1,11 +1,12 @@
 use std::num::NonZeroUsize;
 use std::sync::Arc;
 
-use agent_client_protocol::{ConnectTo, Lines, Stdio};
+use agent_client_protocol::{Client, ConnectTo, Lines, Stdio};
 use agent_client_protocol_http::{AcpHttpServer, CorsOptions, ServerOptions};
 use axum::Router;
 use kernel::Kernel;
 use protocol::ProductIdentity;
+use tracing::instrument::WithSubscriber;
 
 use crate::{AcpServerFactory, AcpTransportKind};
 
@@ -66,6 +67,38 @@ impl AcpServerFactory {
         self.component(AcpTransportKind::InProcess)
             .connect_to(Lines::new(outgoing, incoming))
             .await?;
+        Ok(())
+    }
+
+    /// Serves a peer authenticated by the desktop host, with remote ACP restrictions.
+    pub async fn serve_remote_lines<O, I>(
+        &self,
+        outgoing: O,
+        incoming: I,
+    ) -> Result<(), AcpTransportError>
+    where
+        O: futures::Sink<String, Error = std::io::Error> + Send + 'static,
+        I: futures::Stream<Item = std::io::Result<String>> + Send + 'static,
+    {
+        // The SDK's line codec traces both JSON bodies. Scope the silent dispatcher to
+        // the wire driver; the ACP handlers still report method, duration and outcome.
+        let (channel, driver) = ConnectTo::<Client>::into_channel_and_future(
+            Lines::new(outgoing, incoming),
+        );
+        let mut wire = driver
+            .expect("the SDK Lines transport owns its I/O driver")
+            .map_future(|io| io.with_subscriber(tracing::Dispatch::none()));
+        let server =
+            self.component(AcpTransportKind::Remote).connect_to(channel);
+        tokio::select! {
+            result = &mut wire => result?,
+            result = server => {
+                result?;
+                // Flush already accepted replies without requiring a remote half-close.
+                let _ = wire.request_finish();
+                wire.await?;
+            }
+        }
         Ok(())
     }
 

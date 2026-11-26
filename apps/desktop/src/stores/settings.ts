@@ -69,7 +69,7 @@ export function createSettingsStore(): SettingsStore {
       if (pending !== undefined) clearTimeout(pending);
       pending = setTimeout(() => {
         pending = undefined;
-        void Storage.setItem(STORAGE_KEY, JSON.stringify({ appearance: next.appearance, language: next.language })).catch((error: unknown) =>
+        void Storage.setItem(STORAGE_KEY, JSON.stringify(settings())).catch((error: unknown) =>
           console.warn(`saving settings: ${messageOf(error)}`),
         );
       }, SAVE_DELAY_MS);

@@ -21,3 +21,25 @@ and the same environment variable with `nsh test --target linux` for native UI c
 The TSX tests start the real backend, which reads `CLAW_CONFIG`. Always point it at
 `tests/fixture/config.toml` (an offline provider, data under `target/fixture-data`) so tests never open your own
 configuration or Sessions.
+
+## Pair two computers
+
+On the host, open **Settings → Remote control**, enable **Allow remote control**, and choose **Add device**. On the controller, open the computer menu, choose **Add remote computer**, and paste the pairing code. Check the device name on the host before choosing **Allow**. A paired device can start conversations, run tools and modify files with the host user's permissions. Provider sign-in and credential management are available through the host interface.
+
+Select the host in the controller's sidebar and choose a workspace on that host. A file permission request can be answered from the remote conversation. On the host, **Disconnect** ends the current connection. **Revoke** also removes trust, so the device must pair again.
+
+### Run two Wayland instances on one machine
+
+Each instance needs its own desktop profile and backend state. From this directory run the following commands in separate terminals, with your normal provider configuration. The explicit backend override takes precedence over a data directory in that configuration. Use two free dev-server ports.
+
+```sh
+GDK_BACKEND=wayland XDG_DATA_HOME="$PWD/target/r1-host/desktop" CLAW_SESSION_PERSISTENCE__DATA_HOME="$PWD/target/r1-host/backend" CLAW_DESKTOP_RELAY=direct nsh run --port 18790
+```
+
+```sh
+GDK_BACKEND=wayland XDG_DATA_HOME="$PWD/target/r1-controller/desktop" CLAW_SESSION_PERSISTENCE__DATA_HOME="$PWD/target/r1-controller/backend" CLAW_DESKTOP_RELAY=direct nsh run --port 18791
+```
+
+NSH keeps language and appearance settings under `$XDG_DATA_HOME/com.clawcode.desktop/`. In that directory the native bridge stores the private key in `device.key` and the sharing preference, trusted devices and remembered hosts in `remote.json`. Sharing starts off until the owner explicitly enables it in this profile. Each running process needs its own profile directory.
+
+`CLAW_DESKTOP_RELAY=direct` selects loopback for same-machine testing. Leave the variable unset for LAN discovery and the default relay, or set it to your relay URL.

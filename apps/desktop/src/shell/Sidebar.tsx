@@ -9,17 +9,20 @@ import { SidebarRowView, sidebarRows } from "./SessionRows";
 import { groupByWorkspace } from "./workspaces";
 
 /** The sidebar: the computer, New session, workspaces with their Sessions, recent Sessions and Settings. */
-export function Sidebar(props: { store: AppStore; onOpenSettings: () => void }) {
+export function Sidebar(props: { store: AppStore; onOpenSettings: () => void; onAddHost?: () => void }) {
   const host = () => props.store.currentHost();
   // Which workspace groups are open; kept here by cwd, never in a list cell (cells are reused).
   const expanded = signal<ReadonlySet<string>>(new Set());
   // The newest workspace starts open, once its Sessions have arrived.
-  let seeded = false;
+  const remembered = new Map<string, ReadonlySet<string>>();
+  let previous: string | undefined;
   effect(() => {
-    const newest = seeded ? undefined : groupByWorkspace(host().sessions())[0];
-    if (newest === undefined) return;
-    seeded = true;
-    expanded.set(new Set([newest.cwd]));
+    const id = host().info.id;
+    const newest = groupByWorkspace(host().sessions())[0];
+    if (id === previous && remembered.has(id)) return;
+    previous = id;
+    if (newest && !remembered.has(id)) remembered.set(id, new Set([newest.cwd]));
+    expanded.set(remembered.get(id) ?? new Set());
   });
   const rows = computed(() => sidebarRows(host().sessions(), expanded()));
   const context = {
@@ -31,13 +34,14 @@ export function Sidebar(props: { store: AppStore; onOpenSettings: () => void }) 
       expanded.update((open) => {
         const next = new Set(open);
         if (!next.delete(cwd)) next.add(cwd);
+        remembered.set(host().info.id, next);
         return next;
       }),
   };
   return (
     <View class="w-[280px] gap-1 bg-sidebar px-2 pb-2">
       <View class="items-start px-0.5 pb-1">
-        <HostSwitcher store={props.store} />
+        <HostSwitcher store={props.store} onAddHost={props.onAddHost} />
       </View>
       <If when={host().phase().kind === "ready"}>
         <ListItem label={t("shell.newSession")} icon="square-pen" onPress={() => props.store.selectHost(host().info.id)} />

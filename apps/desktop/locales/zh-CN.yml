@@ -22,6 +22,7 @@ host:
     unanswered: "后端没有响应：%{detail}"
     stopped: "后端已停止：%{detail}"
 notice:
+  newSessionFailed: 无法创建会话
   promptFailed: 消息未发送
 shell:
   newSession: 新会话
@@ -66,3 +67,60 @@ composer:
   stop: 停止
   attach: 添加附件
   attachSoon: 附件功能即将推出
+remote:
+  title: 远程控制
+  allowControl: 允许远程控制
+  deviceName: 设备名称
+  save: 保存
+  addDevice: 添加设备
+  trustedDevices: 已信任设备
+  noDevices: 暂无已信任设备。
+  connections: "%{count} 台设备正在远程连接"
+  disconnect: 断开连接
+  revoke: 撤销
+  revokeTitle: "撤销“%{name}”的访问权限？"
+  revokeDetails: 这台设备会立即断开连接。重新配对后才能再次访问。
+  revokeAccess: 撤销访问权限
+  approveTitle: "允许“%{name}”控制这台电脑？"
+  approveDetails: 这台设备可以代你收发对话、运行命令，并在你的账户权限范围内读写文件，包括工作区以外的文件。操作仍遵循本机的审批设置。
+  deviceKey: "设备公钥指纹：%{key}"
+  deny: 拒绝
+  allow: 允许
+  code: 配对码
+  qr: 配对二维码
+  expires: "仅限使用一次，%{time} 失效。"
+  copyCode: 复制配对码
+  inviteEnded: 此配对码已失效。
+  newCode: 生成新配对码
+  addHost: 添加远程电脑
+  enterCode: 粘贴要控制的电脑上显示的配对码。
+  waiting: 正在等待对方确认配对…
+  pair: 配对
+  offline: "“%{name}”已离线。%{detail}"
+  retry: 重试
+  incompatible: 双方版本不兼容，请升级两台电脑上的应用后重试。
+  noDataDirectory: 无法访问桌面应用的数据目录。
+  localUnavailable: 本机后端启动后才能允许远程控制。
+  workspacePath: 远程工作区路径
+  enterPath: 输入远程路径…
+  useWorkspace: 使用此工作区
+  pathHelp: 输入文件夹在远程电脑上的绝对路径。
+  status:
+    starting: 正在连接…
+    reconnecting: 正在重新连接…
+    ready: 已连接
+    offline: 已离线
+    failed: 已离线
+  error:
+    delivery: 这台电脑未能处理远程电脑发来的消息。请重新连接后再试。
+    congested: 远程连接发送队列已满。请重新连接后再试。
+    invalid: 配对码无效，请从另一台电脑复制新的配对码。
+    expired: 配对码已过期，请在另一台电脑生成新的配对码。
+    declined: 对方拒绝了配对或访问请求。
+    revoked: 这台设备的访问权限已被撤销。请重新配对后再连接。
+    stopped: 对方已关闭远程控制。
+    disconnected: 对方已断开这台设备的连接。
+    timeout: 远程电脑未能及时响应。
+    unavailable: 请检查对方电脑是否在线，并已允许远程控制。
+    closed: 远程连接已关闭。
+    self: 此配对码属于这台电脑，请使用另一台电脑的配对码。

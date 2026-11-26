@@ -14,7 +14,9 @@ function Entry() {
     { sessionId: "s2", cwd: "/work/alpha", title: "Second", modifiedAtMs: "2000" },
     { sessionId: "s3", cwd: "/work/beta", title: "Third", modifiedAtMs: "1000" },
   ]);
-  const store = createAppStore([createHostStore(LOCAL_HOST, agent.transport)]);
+  // A distinct host with an empty workspace catalog exercises remote-path entry in the shell.
+  const remote = createHostStore({ id: "workstation", name: "Workstation", kind: "remote" }, new ScriptedAgent([]).transport);
+  const store = createAppStore([createHostStore(LOCAL_HOST, agent.transport), remote]);
   const settings = createSettingsStore();
   void store.start().then(() => agent.push(agent.state("s2", "running")));
   return <Shell store={store} settings={settings} />;

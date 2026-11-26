@@ -22,6 +22,7 @@ host:
     unanswered: "Backend did not answer: %{detail}"
     stopped: "Backend stopped: %{detail}"
 notice:
+  newSessionFailed: Could not start the session
   promptFailed: The message was not sent
 shell:
   newSession: New session
@@ -66,3 +67,60 @@ composer:
   stop: Stop
   attach: Attach files
   attachSoon: Attachments are coming soon
+remote:
+  title: Remote control
+  allowControl: Allow remote control
+  deviceName: Device name
+  save: Save
+  addDevice: Add device
+  trustedDevices: Trusted devices
+  noDevices: No trusted devices yet.
+  connections: "Connected devices: %{count}"
+  disconnect: Disconnect
+  revoke: Revoke
+  revokeTitle: "Revoke access for %{name}?"
+  revokeDetails: This device will disconnect immediately. Pair it again to restore access.
+  revokeAccess: Revoke access
+  approveTitle: "Allow %{name} to control this computer?"
+  approveDetails: This device can send messages, run commands, and read or change files your account can access, including files outside your workspaces. Your usual approval settings apply.
+  deviceKey: "Device key: %{key}"
+  deny: Deny
+  allow: Allow
+  code: Pairing code
+  qr: Pairing QR code
+  expires: "One use. Expires at %{time}."
+  copyCode: Copy pairing code
+  inviteEnded: This pairing code is no longer valid.
+  newCode: Generate new code
+  addHost: Add remote computer
+  enterCode: Paste the code shown on the computer you want to control.
+  waiting: Waiting for the other computer to approve pairing…
+  pair: Pair
+  offline: "%{name} is offline. %{detail}"
+  retry: Retry
+  incompatible: These computers use incompatible versions. Update both apps and retry.
+  noDataDirectory: The desktop data directory is unavailable.
+  localUnavailable: Start the local backend to allow remote control.
+  workspacePath: Remote workspace path
+  enterPath: Enter remote path…
+  useWorkspace: Use workspace
+  pathHelp: Enter the absolute folder path as it appears on the remote computer.
+  status:
+    starting: Connecting…
+    reconnecting: Reconnecting…
+    ready: Connected
+    offline: Offline
+    failed: Offline
+  error:
+    congested: The remote connection could not keep up. Reconnect and try again.
+    delivery: This computer could not process a message from the remote computer. Reconnect and try again.
+    invalid: The pairing code is invalid. Copy a new code from the other computer.
+    expired: The pairing code expired. Generate a new one on the other computer.
+    declined: Pairing or access was denied on the other computer.
+    revoked: This device’s access was revoked. Pair again to reconnect.
+    stopped: Remote control was turned off on the other computer.
+    disconnected: The other computer disconnected this device.
+    timeout: The remote computer did not respond in time.
+    unavailable: Check that the other computer is online and allows remote control.
+    closed: The remote connection closed.
+    self: This code belongs to this computer. Use a code from another computer.

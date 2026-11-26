@@ -1,3 +1,5 @@
+import { RemoteHosting } from "clawcode-backend";
+import { QrCode } from "../ui/qr";
 import { mount, Scroll, setColorScheme, signal, Text, View } from "nsh";
 import type { JSX } from "nsh/jsx-runtime";
 
@@ -246,6 +248,9 @@ function Gallery() {
             </Disclosure>
             <Markdown text={"Fixed it. See [the change](https://example.com).\n\n```rust\nlet atom = Atom::from(x);\n```"} />
           </View>
+        </Section>
+        <Section title="QR code">
+          <QrCode uri={RemoteHosting.qr("Clawcode gallery")} />
         </Section>
         <Section title="Feedback">
           <Spinner label="Loading" />

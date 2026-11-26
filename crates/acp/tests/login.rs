@@ -400,6 +400,75 @@ async fn initialize_advertises_login_methods() {
     .await;
 }
 
+/// A paired remote can use sessions while credentials and OAuth flows stay on the host.
+#[tokio::test]
+async fn remote_sessions_work_without_exposing_host_credentials() {
+    let logs = CapturedLogs::default();
+    let _subscriber = tracing::subscriber::set_default(
+        tracing_subscriber::fmt()
+            .with_env_filter(tracing_subscriber::EnvFilter::new(
+                "acp::trace=debug",
+            ))
+            .with_writer(logs.clone())
+            .finish(),
+    );
+    let root = tempfile::tempdir().expect("state");
+    let model = LoginModel::new(None);
+    let (_, server) = login_server(root.path(), &model);
+    Client
+        .v2()
+        .connect_with(
+            server.component(AcpTransportKind::Remote),
+            async |connection| {
+                let initialized = connection
+                    .send_request(wire::InitializeRequest::new(
+                        ProtocolVersion::V2,
+                        wire::Implementation::new(
+                            "private-controller-name",
+                            "1",
+                        ),
+                    ))
+                    .block_task()
+                    .await?;
+                assert!(
+                    initialized.auth_methods.is_empty(),
+                    "login is only available on the host"
+                );
+                let denied = connection
+                    .send_request(login_request())
+                    .block_task()
+                    .await
+                    .expect_err("remote login");
+                assert!(denied.message.contains("host"), "{denied}");
+                for request in [
+                    auth_status(),
+                    agent_client_protocol::UntypedMessage::new(
+                        protocol::AcpExtensionMethod::McpOAuthContinue.as_str(),
+                        serde_json::json!({}),
+                    )?,
+                ] {
+                    let denied = connection
+                        .send_request(request)
+                        .block_task()
+                        .await
+                        .expect_err("host-only credentials");
+                    assert!(denied.message.contains("host"), "{denied}");
+                }
+                connection
+                    .send_request(wire::ListSessionsRequest::new())
+                    .block_task()
+                    .await?;
+                assert_eq!(model.codes_issued.load(Ordering::SeqCst), 0);
+                Ok(())
+            },
+        )
+        .await
+        .expect("remote ACP");
+    let log = logs.content();
+    assert!(log.contains("over remote"));
+    assert!(!log.contains("private-controller-name"));
+}
+
 /// Without a sign-in the list stays empty, so clients must not call `auth/login`.
 #[tokio::test]
 async fn initialize_omits_login_methods_without_oauth() {
@@ -933,6 +1002,80 @@ fn auth_status() -> agent_client_protocol::UntypedMessage {
         serde_json::json!({}),
     )
     .expect("auth status request")
+}
+
+/// Checks the production line transport in both directions, including an error reply.
+#[tokio::test]
+async fn remote_line_trace_omits_request_response_and_error_bodies() {
+    use futures::{SinkExt, StreamExt, channel::mpsc as frames};
+
+    let logs = CapturedLogs::default();
+    let _subscriber = tracing::subscriber::set_default(
+        tracing_subscriber::fmt()
+            .without_time()
+            .with_ansi(false)
+            .with_env_filter(tracing_subscriber::EnvFilter::new(
+                "acp::trace=debug,agent_client_protocol=trace",
+            ))
+            .with_writer(logs.clone())
+            .finish(),
+    );
+    let root = tempfile::tempdir().expect("state");
+    let (_, factory) = login_server(root.path(), &LoginModel::new(None));
+    let (outbound, mut replies) = frames::unbounded();
+    let (mut requests, inbound) = frames::unbounded();
+    let serve = factory
+        .serve_remote_lines(outbound.sink_map_err(io::Error::other), inbound);
+    let client = async move {
+        for (id, method, params) in [
+            (
+                1,
+                "initialize",
+                serde_json::json!({"protocolVersion":2,"info":{"name":"remote-wire-synthetic","version":"1"}}),
+            ),
+            (
+                2,
+                "session/list",
+                serde_json::json!({"cursor":"private-remote-cursor"}),
+            ),
+        ] {
+            let frame = serde_json::json!({"jsonrpc":"2.0","id":id,"method":method,"params":params});
+            requests.send(Ok(frame.to_string())).await.expect("send");
+            let response = replies.next().await.expect("reply");
+            let response: serde_json::Value =
+                serde_json::from_str(&response).expect("JSON");
+            assert_eq!(response["id"], id);
+            if id == 2 {
+                assert!(
+                    response["error"]
+                        .to_string()
+                        .contains("session/list cursor is not recognized")
+                );
+            } else {
+                assert_eq!(response["result"]["protocolVersion"], 2);
+            }
+        }
+    };
+    let (served, ()) =
+        tokio::time::timeout(WAIT, async { tokio::join!(serve, client) })
+            .await
+            .expect("remote transport drains on EOF");
+    served.expect("remote service");
+    let output = logs.content();
+    assert!(output.contains("over remote"));
+    assert!(output.contains("failed ACP request session/list"));
+    for private in [
+        "remote-wire-synthetic",
+        "private-remote-cursor",
+        "session/list cursor is not recognized",
+        "Sending JSON-RPC message",
+        "Received JSON-RPC message",
+    ] {
+        assert!(
+            !output.contains(private),
+            "remote traffic was logged: {private}"
+        );
+    }
 }
 
 /// The status names each method once and follows a completed sign-in.

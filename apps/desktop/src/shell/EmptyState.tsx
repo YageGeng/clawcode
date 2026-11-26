@@ -25,7 +25,7 @@ export function EmptyState(props: {
         <Text class={`${type.heading} text-foreground`}>{t("empty.heading")}</Text>
         {/* The picker and the closing words stay together, so "?" never wraps onto a line alone. */}
         <View class="flex-row items-center gap-2">
-          <WorkspacePicker workspaces={workspaces()} value={props.cwd} onChange={props.onCwdChange} size="md" />
+          <WorkspacePicker remote={props.host.info.kind === "remote"} workspaces={workspaces()} value={props.cwd} onChange={props.onCwdChange} size="md" />
           <Text class={`${type.heading} text-foreground`}>{t("empty.headingAfter")}</Text>
         </View>
       </View>

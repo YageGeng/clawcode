@@ -3,6 +3,7 @@ import { t } from "nsh/i18n";
 
 import { APPEARANCES, LANGUAGES } from "../stores/settings";
 import type { Appearance, Language, SettingsStore } from "../stores/settings";
+import { Button } from "../ui/button";
 import { Dialog } from "../ui/dialog";
 import { Field } from "../ui/input";
 import { Select } from "../ui/selection";
@@ -11,7 +12,7 @@ import { Select } from "../ui/selection";
 const LANGUAGE_NAMES: Readonly<Record<Exclude<Language, "system">, string>> = { en: "English", "zh-CN": "简体中文" };
 
 /** The settings dialog: appearance and interface language, applied as they change. */
-export function SettingsDialog(props: { open: boolean; settings: SettingsStore; onClose: () => void }) {
+export function SettingsDialog(props: { open: boolean; settings: SettingsStore; onClose: () => void; onRemoteSettings?: () => void }) {
   return (
     <Dialog open={props.open} title={t("settings.title")} onClose={props.onClose}>
       <View class="gap-4">
@@ -31,6 +32,9 @@ export function SettingsDialog(props: { open: boolean; settings: SettingsStore; 
             onChange={(value) => value !== null && props.settings.update({ language: value as Language })}
           />
         </Field>
+        <If when={props.onRemoteSettings !== undefined}>
+          <Button class="self-start" label={t("remote.title")} icon="laptop" variant="outline" onPress={() => props.onRemoteSettings?.()} />
+        </If>
       </View>
     </Dialog>
   );

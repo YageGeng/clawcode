@@ -85,7 +85,7 @@ export function SessionView(props: { host: HostStore; sessionId: SessionId }) {
           </Appear>
         </If>
       </View>
-      <Composer host={props.host} sessionId={props.sessionId} onSend={(text) => props.host.prompt(props.sessionId, text)} />
+      <Composer host={props.host} disabled={props.host.phase().kind !== "ready"} sessionId={props.sessionId} onSend={(text) => props.host.prompt(props.sessionId, text)} />
     </View>
   );
 }

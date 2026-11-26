@@ -14,7 +14,7 @@ export type AppStore = Readonly<{
   location: Accessor<AppLocation>;
   canGoBack: Accessor<boolean>;
   canGoForward: Accessor<boolean>;
-  /** Adds a host (R1: a paired remote host) and starts it. */
+  /** Starts a new or reconnected host, restoring its open Session on reconnect. */
   addHost: (host: HostStore) => void;
   /** Shows a host with no Session open. */
   selectHost: (hostId: string) => void;
@@ -43,6 +43,14 @@ export function createAppStore(initialHosts: readonly HostStore[]): AppStore {
     position.set({ location: history.current, canGoBack: history.canGoBack, canGoForward: history.canGoForward });
   /** The host with `hostId`, if the app has it. */
   const find = (hostId: string) => hosts().find((host) => host.info.id === hostId);
+  /** Attaches a visible Session to its current ACP connection; offline locations keep their cached transcript. */
+  const attachCurrent = () => {
+    const { hostId, sessionId } = history.current;
+    const host = find(hostId);
+    if (sessionId && host?.phase().kind === "ready") {
+      void host.openSession(sessionId).catch((error: unknown) => console.warn(`open ${sessionId} on ${hostId}: ${messageOf(error)}`));
+    }
+  };
   /** Moves to `location` when its host exists; warns and stays otherwise. */
   const go = (location: AppLocation) => {
     if (find(location.hostId) === undefined) {
@@ -59,16 +67,22 @@ export function createAppStore(initialHosts: readonly HostStore[]): AppStore {
     canGoBack: () => position().canGoBack,
     canGoForward: () => position().canGoForward,
     addHost: (host) => {
-      hosts.update((list) => [...list, host]);
-      void host.start();
+      const previous = find(host.info.id);
+      previous?.stop();
+      // Seed the retry's directory and transcripts before publishing it, so the mounted composer keeps its draft.
+      const started = host.start(previous);
+      hosts.update((list) => previous
+        ? list.map((item) => item.info.id === host.info.id ? host : item)
+        : [...list, host]);
+      // Keep the navigation entry across retries. Replay only if this connection and location are still current.
+      void started.then(() => {
+        if (history.current.hostId === host.info.id && find(host.info.id) === host) attachCurrent();
+      });
     },
     selectHost: (hostId) => go({ hostId, sessionId: null }),
     openSession: (hostId, sessionId) => {
       go({ hostId, sessionId });
-      // Navigation shows the Session at once; its transcript arrives as the host replays it.
-      find(hostId)
-        ?.openSession(sessionId)
-        .catch((error: unknown) => console.warn(`open ${sessionId} on ${hostId}: ${messageOf(error)}`));
+      if (history.current.hostId === hostId) attachCurrent();
     },
     startSession: async (hostId, cwd, text) => {
       const host = find(hostId);
@@ -79,10 +93,16 @@ export function createAppStore(initialHosts: readonly HostStore[]): AppStore {
       await host.prompt(sessionId, text);
     },
     back: () => {
-      if (history.back() !== undefined) publish();
+      if (history.back() !== undefined) {
+        publish();
+        attachCurrent();
+      }
     },
     forward: () => {
-      if (history.forward() !== undefined) publish();
+      if (history.forward() !== undefined) {
+        publish();
+        attachCurrent();
+      }
     },
     start: async () => {
       await Promise.all(hosts().map((host) => host.start()));

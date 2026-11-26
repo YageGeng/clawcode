@@ -38,6 +38,7 @@ export type HostFailure = Readonly<{ cause: "start" | "unanswered" | "stopped"; 
 /** Where the connection to a host stands. */
 export type HostPhase =
   | Readonly<{ kind: "starting" }>
+  | Readonly<{ kind: "reconnecting" }>
   | Readonly<{ kind: "ready" }>
   | Readonly<{ kind: "failed"; failure: HostFailure }>
   // Was ready, then lost its backend: its Sessions stay on screen, read-only in effect (requests fail).
@@ -60,8 +61,8 @@ export type HostStore = Readonly<{
   /** Notices not yet shown; `dismissNotice` takes one off once it is. */
   notices: Accessor<readonly SessionNotice[]>;
   dismissNotice: (id: string) => void;
-  /** Connects, initializes and lists the Sessions; failures land in `phase`, never throw. */
-  start: () => Promise<void>;
+  /** Connects, initializes and lists the Sessions, retaining the previous connection's readable cache on retry. */
+  start: (previous?: HostStore) => Promise<void>;
   /** Closes the connection. */
   stop: () => void;
   /** Shows a Session: replays its transcript unless it is running and already attached. */
@@ -95,6 +96,8 @@ export function createHostStore(
   const returnedText = signal<ReadonlyMap<SessionId, string>>(new Map());
   // Sessions whose transcript was replayed on this connection.
   const attached = new Set<SessionId>();
+  const opening = new Map<SessionId, Promise<void>>();
+  let hasCache = false;
   // Resolvers of queued permission dialogs; `undefined` dismisses without choosing.
   const permissionAnswers = new Map<string, (optionId: string | undefined) => void>();
   let permissionSequence = 0;
@@ -118,10 +121,13 @@ export function createHostStore(
 
   const connection = new AcpConnection(transport, {
     notification: (notification) => applyNotification(notification),
-    diagnostic: (message) => console.warn(`ACP (${info.name}): ${message}`),
+    // Remote frame parse errors can include peer-provided text. Log only the affected connection.
+    diagnostic: (message) => console.warn(info.kind === "remote"
+      ? `ACP protocol diagnostic for remote host ${info.id.slice(0, 12)}`
+      : `ACP (${info.name}): ${message}`),
     closed: (reason) => {
       // After it was ready, its Sessions stay readable offline; before, the host never started.
-      phase.set({ kind: phase().kind === "ready" ? "offline" : "failed", failure: { cause: "stopped", detail: reason } });
+      phase.set({ kind: hasCache ? "offline" : "failed", failure: { cause: "stopped", detail: reason } });
       dispatch({ type: "sessions/stopped" });
     },
   });
@@ -175,11 +181,21 @@ export function createHostStore(
   connection.handle(AcpProtocol.methods.sessionRequestPermission, requestPermission);
 
   /** Connects, initializes and lists the Sessions, once. */
-  const connectOnce = async () => {
+  const connectOnce = async (previous?: HostStore) => {
+    if (previous && ["ready", "offline", "reconnecting"].includes(previous.phase().kind)) {
+      // Only local projections survive reconnect. ACP request IDs, approvals and replay cursors belong to the old wire.
+      const { sessions, sessionWorkspaces, notices } = previous.workspace();
+      workspace.set(reduceWorkspace({ sessions, sessionWorkspaces, notices, permissions: [] }, { type: "sessions/stopped" }));
+      returnedText.set(previous.returnedText());
+      hasCache = true;
+      phase.set({ kind: "reconnecting" });
+    }
     try {
-      await connection.connect();
+      // iroh may use up to 20 s for discovery/dial and another 100 s for the native handshake.
+      // Allow that layer to report the actual failure instead of truncating it at the local boot timeout.
+      await connection.connect(info.kind === "remote" ? 125_000 : undefined);
     } catch (error: unknown) {
-      phase.set({ kind: "failed", failure: { cause: "start", detail: messageOf(error) } });
+      phase.set({ kind: hasCache ? "offline" : "failed", failure: { cause: "start", detail: messageOf(error) } });
       return;
     }
     try {
@@ -194,17 +210,19 @@ export function createHostStore(
         { timeoutMs },
       );
       await refreshSessions();
+      hasCache = true;
       phase.set({ kind: "ready" });
     } catch (error: unknown) {
-      phase.set({ kind: "failed", failure: { cause: "unanswered", detail: messageOf(error) } });
+      // A peer that could not initialize ACP must not keep a live remote-control slot on the host.
+      if (info.kind === "remote") connection.close();
+      phase.set({ kind: hasCache ? "offline" : "failed", failure: { cause: "unanswered", detail: messageOf(error) } });
     }
   };
-  // A connection connects once: repeated `start` calls share the first attempt
-  // (R1's retry will make a fresh connection per attempt).
+  // Repeated starts share this attempt. A retry owns a new connection and request numbering.
   let started: Promise<void> | undefined;
 
   /** Replays a Session unless it is running and already attached; ported from the WebUI controller's `loadAttachedSession`. */
-  const openSession = async (sessionId: SessionId) => {
+  const replaySession = async (sessionId: SessionId) => {
     const session = workspace().sessions.find((item) => item.sessionId === sessionId);
     if (session === undefined) throw new Error(`Session ${sessionId} is not listed`);
     const { running } = await readRuntime(sessionId);
@@ -212,10 +230,20 @@ export function createHostStore(
     setRunning(sessionId, running);
     if (attached.has(sessionId) && running) return;
     // Idle Sessions replay on every open: another client may have changed the transcript.
-    router.requireFullReplay(sessionId);
-    dispatch({ type: "session/updated", sessionId, action: { type: "transcript/cleared" } });
-    await connection.request(AcpProtocol.methods.sessionResume, { sessionId, cwd: session.cwd, replayFrom: { type: "start" } });
+    attached.delete(sessionId);
+    await router.replay(sessionId, () => connection.request(AcpProtocol.methods.sessionResume, {
+      sessionId, cwd: session.cwd, replayFrom: { type: "start" },
+    }));
     attached.add(sessionId);
+  };
+
+  /** Shares an in-flight replay across navigation, reconnect and new-Session callbacks. */
+  const openSession = (sessionId: SessionId) => {
+    const pending = opening.get(sessionId);
+    if (pending) return pending;
+    const replay = replaySession(sessionId).finally(() => opening.delete(sessionId));
+    opening.set(sessionId, replay);
+    return replay;
   };
 
   return {
@@ -228,7 +256,7 @@ export function createHostStore(
     permissionFor: (sessionId) => permissions().find((prompt) => prompt.sessionId === sessionId),
     notices,
     dismissNotice: (id) => dispatch({ type: "notice/dismissed", id }),
-    start: () => (started ??= connectOnce()),
+    start: (previous) => (started ??= connectOnce(previous)),
     stop: () => connection.close(),
     openSession,
     newSession: async (cwd) => {

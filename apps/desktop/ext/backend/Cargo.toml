@@ -12,19 +12,28 @@ workspace = true
 acp = { workspace = true }
 app = { workspace = true }
 config = { workspace = true }
+remote = { workspace = true }
+
+# error
+anyhow = { workspace = true }
 
 # tracing & log
 tracing = { workspace = true }
 
 # async
 futures = { workspace = true }
-tokio = { workspace = true, features = ["macros", "rt-multi-thread"] }
+tokio = { workspace = true, features = ["macros", "rt-multi-thread", "sync"] }
+tokio-util = { workspace = true }
 
 # builder
 typed-builder = { workspace = true }
 
 # gui
 nsh-core = { workspace = true }
+qrcode = { workspace = true }
+
+# misc
+base64 = { workspace = true }
 
 [target.'cfg(target_os = "linux")'.dependencies]
 # gui

@@ -7,7 +7,7 @@ function openGallery() {
 
 test("gallery_shows_every_component", async () => {
   const app = await openGallery();
-  for (const title of ["Button", "IconButton", "Input", "Selection", "Tabs", "Menu", "Dialog", "Toast", "ListItem", "TreeList", "Surface", "Feedback"]) {
+  for (const title of ["Button", "IconButton", "Input", "Selection", "Tabs", "Menu", "Dialog", "Toast", "ListItem", "TreeList", "Surface", "QR code", "Feedback"]) {
     await app.waitFor(`text:${title}`);
   }
 });

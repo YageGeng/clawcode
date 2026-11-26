@@ -1,7 +1,10 @@
 //! The desktop app's Rust side: what `App.tsx` imports from `clawcode-backend`.
 //! Their TypeScript declarations are generated from these types into `.nsh/types`.
 
+mod connection;
 mod fonts;
+mod hosting;
+mod runtime;
 mod thread;
 mod title_bar;
 
@@ -11,6 +14,10 @@ use futures::StreamExt;
 use nsh_core::file_dialog::OpenDialog;
 use nsh_core::prelude::*;
 
+pub use connection::{RemoteConnection, RemotePairing};
+pub use hosting::{
+    HostingSnapshot, PairingInvitation, RemoteDevice, RemoteHosting,
+};
 pub use thread::{BackendOutput, BackendThread};
 
 /// The crate's native module (`nsh.json` `"rust"`).
@@ -18,6 +25,9 @@ pub use thread::{BackendOutput, BackendThread};
 fn native(registry: &mut Registry) {
     registry
         .class::<Backend>()
+        .class::<RemoteHosting>()
+        .class::<RemoteConnection>()
+        .class::<RemotePairing>()
         .module::<Folders>()
         .module::<title_bar::WindowControls>()
         .module::<fonts::DesktopFonts>();
@@ -47,17 +57,26 @@ pub struct Backend {
     output: Option<BackendOutput>,
 }
 
+impl From<(BackendThread, BackendOutput)> for Backend {
+    /// Takes ownership of one running local application and its NSH frame stream.
+    fn from((thread, output): (BackendThread, BackendOutput)) -> Self {
+        Self {
+            thread,
+            output: Some(output),
+        }
+    }
+}
+
 #[class]
 impl Backend {
     /// Starts the backend from the user's configuration; rejects with the
     /// reason when the configuration or the application fails.
     pub async fn start() -> Result<Backend, String> {
-        let config = config::load().map_err(|error| error.to_string())?;
-        let (thread, output) = BackendThread::start(config).await?;
-        Ok(Backend {
-            thread,
-            output: Some(output),
-        })
+        let config = config::load().map_err(|error| {
+            tracing::error!("desktop configuration failed to load: {}", error);
+            error.to_string()
+        })?;
+        BackendThread::start(config).await.map(Backend::from)
     }
 
     /// Sends one ACP frame; throws once the backend has stopped.
@@ -80,7 +99,13 @@ impl Backend {
         while let Some(frame) = frames.next().await {
             listener.post(frame);
         }
-        Ok(ended.await.unwrap_or(None))
+        ended.await.map_err(|error| {
+            tracing::error!(
+                "desktop backend exited without an end reason: {}",
+                error
+            );
+            "desktop backend exited without reporting its drain".to_owned()
+        })
     }
 
     /// Ends the connection and blocks until the backend has stopped or
@@ -92,9 +117,9 @@ impl Backend {
     }
 
     /// Ends the connection, shuts the application down and resolves once its
-    /// thread has stopped.
-    pub async fn shutdown(this: Instance<Self>) {
+    /// runtime has drained, or rejects if blocking work outlived the shutdown deadline.
+    pub async fn shutdown(this: Instance<Self>) -> Result<(), String> {
         let stopped = this.with_mut(|backend| backend.thread.shutdown());
-        stopped.await;
+        stopped.await
     }
 }

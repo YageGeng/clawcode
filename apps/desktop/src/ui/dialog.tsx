@@ -8,20 +8,33 @@ import { IconButton } from "./button";
 /** The title row of a dialog or a sheet, with its close button. */
 function PanelHeader(props: { title: string; onClose: () => void }) {
   return (
-    <View class="flex-row items-center justify-between">
-      <Text class="text-base leading-6 font-semibold text-popover-foreground">{props.title}</Text>
+    <View class="flex-row items-center gap-2">
+      {/* Device names in confirmation titles may wrap; reserve the close button's hit area. */}
+      <Text class="flex-1 text-base leading-6 font-semibold text-popover-foreground">{props.title}</Text>
       <IconButton icon="x" label={t("common.close")} size="sm" onPress={props.onClose} />
     </View>
   );
 }
 
 /** A centered dialog with a title, its content and its actions; Escape and the close button dismiss it. */
-export function Dialog(props: { open: boolean; title: string; children: JSX.Element; actions?: JSX.Element; onClose: () => void }) {
+export function Dialog(props: {
+  open: boolean;
+  title: string;
+  children: JSX.Element;
+  actions?: JSX.Element;
+  /** Let the owner switch back to a parent view or asynchronously reject an access request before closing. */
+  controlledDismissal?: boolean;
+  onClose: () => void;
+}) {
   return (
     <BaseDialog
       open={props.open}
       animation="fade"
       accessibilityLabel={props.title}
+      closeOnEscape={!props.controlledDismissal}
+      closeOnBackdropPress={!props.controlledDismissal}
+      closeOnSwipe={!props.controlledDismissal}
+      onCancel={() => { if (props.controlledDismissal) props.onClose(); }}
       onOpenChange={(event) => {
         if (!event.open) props.onClose();
       }}

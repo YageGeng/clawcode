@@ -1,0 +1,48 @@
+[package]
+name = "remote"
+edition.workspace = true
+version.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+# error
+anyhow = { workspace = true }
+
+# tracing & log
+tracing = { workspace = true }
+
+# async
+futures = { workspace = true }
+tokio = { workspace = true, features = ["io-util", "sync", "time"] }
+tokio-util = { workspace = true, features = ["codec", "rt"] }
+
+# http
+url = { workspace = true }
+
+# remote networking
+iroh = { workspace = true }
+iroh-mdns-address-lookup = { workspace = true }
+
+# serde
+serde = { workspace = true }
+serde_json = { workspace = true }
+
+# crypto
+getrandom = { workspace = true }
+subtle = { workspace = true }
+
+# builder
+typed-builder = { workspace = true }
+
+# fs
+tempfile = { workspace = true }
+
+# misc
+base64 = { workspace = true }
+hostname = { workspace = true }
+
+[dev-dependencies]
+# async
+tokio = { workspace = true, features = ["test-util"] }
