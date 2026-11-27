@@ -37,3 +37,20 @@ test("host_times_out_when_backend_never_answers", async () => {
   expect(phase.kind).toBe("failed");
   expect(phase.kind === "failed" && phase.failure.cause).toBe("unanswered");
 });
+
+test("diff_selections_are_scoped_to_host_and_session_and_survive_a_reconnect", async () => {
+  const local = createHostStore(LOCAL_HOST, new MemoryTransport(acpPeer(sessions)));
+  const info = { id: "paired", kind: "remote", name: "Paired" } as const;
+  const remote = createHostStore(info, new MemoryTransport(acpPeer(sessions)));
+  const id = sessions[0]!.sessionId;
+  const selection = { turnKey: "turn-1", path: "src/a.rs", editId: "second-edit" };
+  await remote.start();
+  remote.selectChange(id, selection);
+  expect(local.changeSelections().get(id)).toBe(undefined);
+  expect(remote.changeSelections().get(sessions[1]!.sessionId)).toBe(undefined);
+  const reconnected = createHostStore(info, new MemoryTransport(acpPeer(sessions)));
+  await reconnected.start(remote);
+  expect(reconnected.changeSelections().get(id)).toEqual(selection);
+  reconnected.selectChange(id);
+  expect(reconnected.changeSelections().has(id)).toBe(false);
+});

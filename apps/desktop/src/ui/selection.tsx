@@ -47,7 +47,23 @@ export function Switch(props: { label: string; checked: boolean; disabled?: bool
   );
 }
 
-/** One value chosen from a list; the popup is as wide as the trigger and shares its padding. */
+/** Estimates the minimum popup width in points so compact triggers never clip wider option labels. */
+function estimatePopupMinWidth(items: readonly SelectItem[]): number {
+  let widest = 0;
+  for (const item of items) {
+    let width = 0;
+    for (const ch of item.title) {
+      const code = ch.charCodeAt(0);
+      // CJK/fullwidth glyphs (~14.5pt) vs uppercase Latin (~8.8pt) vs regular ASCII/punctuation (~7.6pt).
+      width += code > 0x2e7f ? 14.5 : code >= 65 && code <= 90 ? 8.8 : 7.6;
+    }
+    if (width > widest) widest = width;
+  }
+  // Popup border + p-1.5 (14pt) + item px-2.5 (20pt) + gap-2 (8pt) + check icon size-4 (16pt) + safety room (14pt).
+  return Math.min(360, Math.max(140, Math.ceil(widest + 72)));
+}
+
+/** One value chosen from a list; the popup is at least as wide as its trigger and wide enough for its options. */
 export function Select(props: {
   items: SelectItem[];
   value: string | null;
@@ -70,10 +86,21 @@ export function Select(props: {
       accessibilityLabel={props.accessibilityLabel}
       onChange={(event) => props.onChange(event.value)}
       onOpenChange={(event) => props.onOpenChange?.(event.open)}
-      offset={4}
+      offset={6}
+      margin={8}
       class={props.class}
       popupClass={popupSurface}
-      itemClass={`h-8 flex-row items-center rounded-(--radius) px-2.5 ${type.ui} text-popover-foreground focus:bg-accent selected:font-medium disabled:opacity-50 ${motionClass.wash}`}
+      popupStyle={{ minWidth: estimatePopupMinWidth(props.items) }}
+      // Keep the outer Option row column-aligned (`stretch` cross-axis) so NSH's Renderer slot wrapper spans full width.
+      itemClass={`group h-8 justify-center rounded-(--radius) px-2.5 focus:bg-accent hover:bg-accent disabled:opacity-50 ${motionClass.wash}`}
+      renderItem={(entry) => (
+        <View class="flex-row items-center justify-between gap-2">
+          <Text class={`min-w-0 flex-1 truncate ${type.ui} text-popover-foreground group-selected:font-medium`}>{entry.title}</Text>
+          <View class="size-4 shrink-0 items-center justify-center opacity-0 group-selected:opacity-100">
+            <Icon name="check" size="sm" />
+          </View>
+        </View>
+      )}
       trigger={<SelectTrigger label={title()} size={props.size ?? "md"} variant={props.variant ?? "field"}
         triggerRef={props.triggerRef} disabled={props.disabled === true} />}
     />
@@ -87,14 +114,22 @@ const triggerSizing: Readonly<Record<ControlSize, string>> = { sm: "h-6 px-2", m
  * The trigger of a `Select`: an outline field with the chosen title and a chevron. A plain view, not a
  * `Button`: the select owns the press, the role and the keyboard of its trigger.
  */
-function SelectTrigger(props: { label: string; size: ControlSize; disabled: boolean; variant: "field" | "toolbar"; triggerRef?: (node: ViewRef) => void }) {
+function SelectTrigger(props: {
+  label: string;
+  size: ControlSize;
+  disabled: boolean;
+  variant: "field" | "toolbar";
+  triggerRef?: (node: ViewRef) => void;
+}) {
   return (
     <View
       ref={(node) => props.triggerRef?.(node)}
       class={`flex-row items-center justify-between rounded-(--radius) ${props.variant === "toolbar" ? "gap-1 bg-transparent" : "gap-2 border border-input bg-background"} hover:bg-accent ${focusRing} ${motionClass.wash} ${triggerSizing[props.size]} ${props.disabled ? "opacity-50" : ""}`}
     >
       <Text class={`shrink truncate ${props.size === "sm" ? type.meta : type.ui} ${props.variant === "toolbar" ? "font-medium text-muted-foreground" : "text-foreground"}`}>{props.label}</Text>
-      <Icon name="chevron-down" size="sm" color="muted-foreground" />
+      <View class="shrink-0">
+        <Icon name="chevron-down" size="sm" color="muted-foreground" />
+      </View>
     </View>
   );
 }

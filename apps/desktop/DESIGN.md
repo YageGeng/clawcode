@@ -265,3 +265,13 @@ Escape now returns from the invitation to the device list, then to Settings. The
 Two production GTK windows on Wayland used independent host profiles. The controller changed a remote session's model, thinking level, mode and external-write policy. The model picker showed the full model name at 800 × 560. In Simplified Chinese dark mode, all three file policy descriptions wrapped inside the menu and the check followed the active option. Keyboard steps and pointer dragging both changed the thinking level.
 
 The production question flow kept the message draft visible while awaiting an answer. A proposed plan showed its Markdown above the separate decision buttons. The accepted plan could be reopened after the turn. The native file picker produced a removable thumbnail and the paired host received the selected image. The [N2 acceptance record](../../docs/superpowers/plans/2026-11-26-desktop-nsh-n2.md) lists the session, command and attachment checks.
+
+## N3 change-card inspector
+
+| Interaction | Feedback | Reduced motion |
+| --- | --- | --- |
+| Open View changes | The file card opens the Changes inspector at the right. The conversation and its draft keep their place. A narrow session gives the inspector the available width. | Change the layout immediately. |
+| Inspect another file or edit | The card totals all edits to the file in the turn. The inspector shows the selected edit's counts and unified diff. Previous and next step through the edits in order. Receiving the same edit again preserves the reader's scroll position. | Update the content immediately. |
+| Close the inspector | The close button restores the conversation width. Dragging the wide layout's divider adjusts the split directly. | Restore the layout immediately. |
+
+The GTK session fixture on Wayland showed the Chinese inspector beside the conversation at 1200 × 800 in both themes. Dragging the divider resized it. At 800 × 720 the diff filled the session area, and Escape returned to the expanded file card.

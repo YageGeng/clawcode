@@ -2,6 +2,7 @@
 //! Their TypeScript declarations are generated from these types into `.nsh/types`.
 
 mod connection;
+mod diff;
 mod fonts;
 mod hosting;
 mod runtime;
@@ -28,6 +29,7 @@ fn native(registry: &mut Registry) {
         .class::<RemoteHosting>()
         .class::<RemoteConnection>()
         .class::<RemotePairing>()
+        .module::<diff::SnapshotDiff>()
         .module::<Folders>()
         .module::<title_bar::WindowControls>()
         .module::<fonts::DesktopFonts>();

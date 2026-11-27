@@ -1,10 +1,8 @@
-import { WindowControls } from "clawcode-backend";
-import { cleanup, mount, platform } from "nsh";
-import { Application, currentWindow, isAvailable } from "nsh/desktop";
+import { cleanup, mount } from "nsh";
+import { Application } from "nsh/desktop";
 
 import { messageOf } from "./src/client/errors";
 import { Shell } from "./src/shell/Shell";
-import { TITLE_BAR_HEIGHT } from "./src/shell/TitleBar";
 import { createAppStore } from "./src/stores/app";
 import { createHostStore, LOCAL_HOST } from "./src/stores/host";
 import { RemoteStore } from "./src/stores/remote";
@@ -14,12 +12,6 @@ import { configureDesktopFonts } from "./src/ui/fonts";
 
 /** The app's root: owns the stores, this computer's host and the in-process backend behind it. */
 function App() {
-  // The shell draws its own title bar; the system keeps only its window buttons. The main window's size, least
-  // size and restored placement are launch options in nsh.json's "window".
-  if (isAvailable) {
-    if (platform.os === "linux") WindowControls.styleTitleBar();
-    currentWindow().set({ titleBar: { style: "hidden", height: TITLE_BAR_HEIGHT } });
-  }
   const transport = new NativeTransport();
   const store = createAppStore([createHostStore(LOCAL_HOST, transport)]);
   const settings = createSettingsStore();

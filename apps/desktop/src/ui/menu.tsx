@@ -29,6 +29,7 @@ export function Menu(props: {
       onOpenChange={(event) => props.onOpenChange?.(event.open)}
       align={props.align ?? "start"}
       offset={6}
+      margin={8}
       popupClass={`min-w-48 ${popupSurface} ${props.class ?? ""}`}
     >
       <If when={props.title}>
@@ -121,6 +122,7 @@ export function Popover(props: {
       onOpenChange={(event) => props.onOpenChange?.(event.open)}
       onOpen={props.onOpen}
       offset={6}
+      margin={8}
       popupClass={`${popupSurface} p-3 ${props.class ?? ""}`}
     >
       {props.children}

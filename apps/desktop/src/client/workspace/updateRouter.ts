@@ -69,7 +69,8 @@ export class SessionUpdateRouter {
           }
           const history = this.replays.get(item.sessionId)?.history ?? stager;
           const entities = history.snapshot();
-          const decoded = this.decoder.decode(item, entities, ++this.receivedOrder);
+          const publishedTools = history === stager ? undefined : current.sessionWorkspaces.get(item.sessionId)?.tools;
+          const decoded = this.decoder.decode(item, entities, ++this.receivedOrder, publishedTools);
           if (decoded.scope === "branch") {
             // Frames from an already requested resume can still follow this notification. Drain its
             // response before accepting history again, and withdraw cards from the old branch now.

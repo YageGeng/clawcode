@@ -133,7 +133,7 @@ export function Composer(props: {
             when={running()}
             else={
               <Appear entrance="grow" play={swapped}>
-                <IconButton icon="arrow-up" label={t("composer.send")} variant="primary" round disabled={!canSend()} onPress={send} />
+                <IconButton icon="arrow-up" label={t("composer.send")} variant={canSend() ? "primary" : "secondary"} round disabled={!canSend()} onPress={send} />
               </Appear>
             }
           >

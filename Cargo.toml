@@ -154,6 +154,8 @@ agent-client-protocol-http = { version = "5", default-features = false }
 
 # gui
 gtk4 = "0.11"
+# Match the line-diff engine used by the NSH DiffView for legacy ACP snapshots.
+imara-diff = { version = "0.2", default-features = false }
 # Native Shell crates stay at the version of the installed `nsh` CLI.
 nsh-core = "=0.7.1"
 pangocairo = "0.22"

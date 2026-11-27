@@ -56,6 +56,9 @@ export type HostPhase =
   // Was ready, then lost its backend: its Sessions stay on screen, read-only in effect (requests fail).
   | Readonly<{ kind: "offline"; failure: HostFailure }>;
 
+/** Identifies a recorded edit without retaining patch data across a branch replay. */
+export type ChangeSelection = Readonly<{ turnKey: string; path: string; editId: string }>;
+
 /** One host's connection and the Sessions it serves; its methods are the only writers. */
 export type HostStore = Readonly<{
   info: HostInfo;
@@ -101,6 +104,9 @@ export type HostStore = Readonly<{
   newSession: (cwd: string) => Promise<SessionId>;
   /** Sends text and selected images; a failed turn returns the complete draft and adds a notice. */
   prompt: (sessionId: SessionId, text: string, images?: readonly PromptImage[]) => Promise<void>;
+  /** Each Session on this host remembers its own open inspector. */
+  changeSelections: Accessor<ReadonlyMap<SessionId, ChangeSelection>>;
+  selectChange: (sessionId: SessionId, selection?: ChangeSelection) => void;
   returnedDrafts: Accessor<ReadonlyMap<SessionId, PromptDraft>>;
   /** Consumes both parts of the failed prompt in one operation. */
   takeReturnedDraft: (sessionId: SessionId) => PromptDraft | undefined;
@@ -140,6 +146,7 @@ export function createHostStore(
     const cached = offlineSessions();
     return cached ? { ...workspace(), ...cached } : workspace();
   });
+  const changeSelections = signal<ReadonlyMap<SessionId, ChangeSelection>>(new Map());
   const returnedDrafts = signal<ReadonlyMap<SessionId, PromptDraft>>(new Map());
   /** Consume the text and images together so retries and reconnects cannot lose part of a failed submission. */
   const takeReturnedDraft = (sessionId: SessionId) => {
@@ -277,6 +284,7 @@ export function createHostStore(
       const cached = reduceWorkspace({ sessions, sessionWorkspaces, sessionConfigs, awaitingAnswers, sessionCommands: new Map(), notices, permissions: [] }, { type: "sessions/stopped" });
       offlineSessions.set({ sessions, sessionWorkspaces: cached.sessionWorkspaces, awaitingAnswers: cached.awaitingAnswers });
       workspace.set(reduceWorkspace(cached, { type: "questions/invalidated" }));
+      changeSelections.set(previous.changeSelections());
       returnedDrafts.set(previous.returnedDrafts());
       hasCache = true;
       phase.set({ kind: "reconnecting" });
@@ -475,6 +483,13 @@ export function createHostStore(
     info,
     phase,
     workspace: readableWorkspace,
+    changeSelections,
+    selectChange: (sessionId, selection) => changeSelections.update((current) => {
+      const next = new Map(current);
+      if (selection) next.set(sessionId, selection);
+      else next.delete(sessionId);
+      return next;
+    }),
     sessions,
     session: (sessionId) => sessionWorkspaces().get(sessionId),
     commandsFor: (sessionId) => sessionCommands().get(sessionId) ?? EMPTY_COMMANDS,

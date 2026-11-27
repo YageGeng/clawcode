@@ -1,4 +1,5 @@
 import { Text } from "nsh";
+import type { ViewRef } from "nsh";
 import { Button as BaseButton } from "nsh/base";
 import type { JSX } from "nsh/jsx-runtime";
 
@@ -51,6 +52,7 @@ type ButtonBaseProps = {
   loading?: boolean;
   /** Layout from the caller only: width, flex, margin, alignment. */
   class?: string;
+  buttonRef?: (node: ViewRef) => void;
   onPress?: () => void;
 };
 
@@ -60,6 +62,7 @@ export function Button(props: ButtonBaseProps & { label: string; accessibilityLa
   const size = () => props.size ?? "md";
   return (
     <BaseButton
+      ref={(node) => props.buttonRef?.(node)}
       accessibilityLabel={props.accessibilityLabel ?? props.label}
       disabled={props.disabled === true || props.loading === true}
       selected={props.selected === true}
@@ -92,6 +95,7 @@ export function IconButton(props: ButtonBaseProps & { icon: IconName; label: str
   const size = () => props.size ?? "md";
   return (
     <BaseButton
+      ref={(node) => props.buttonRef?.(node)}
       accessibilityLabel={props.label}
       disabled={props.disabled === true || props.loading === true}
       selected={props.selected === true}

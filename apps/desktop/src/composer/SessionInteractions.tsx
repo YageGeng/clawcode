@@ -11,33 +11,43 @@ import { Disclosure } from "../ui/disclosure";
 import { Textarea } from "../ui/input";
 import { Markdown } from "../ui/markdown";
 import { Checkbox, Select } from "../ui/selection";
-import { Surface } from "../ui/surface";
+import { Badge, Separator, Surface } from "../ui/surface";
 import { type } from "../ui/tokens";
 
 type QuestionDraft = Readonly<{ picks: readonly number[]; text: string }>;
 const OTHER = -1;
 
 /** The current plan and replaceable task list share one disclosure; long Markdown scrolls inside it. */
-function PlanCard(props: { plan: SessionPlan; open: boolean; onToggle: () => void }) {
+function PlanCard(props: { plan: SessionPlan; open: boolean; sharedSpace?: boolean; onToggle: () => void }) {
   /** Adds progress only when the host supplied tasks to count. */
   const title = () => props.plan.todos.length ? t("interactions.tasks", {
     done: props.plan.todos.filter((todo) => todo.status === "completed").length, total: props.plan.todos.length,
   }) : t("interactions.plan");
   return (
-    <Surface>
-      <Disclosure label={title()} icon="file-text" open={props.open} onToggle={props.onToggle}>
-        <Scroll class="max-h-36" contentClass="gap-2 px-1 pb-1">
+    <Surface class="p-3">
+      <Disclosure flush label={title()} icon="file-text" open={props.open} onToggle={props.onToggle}>
+        <Scroll class={props.sharedSpace ? "max-h-24" : "max-h-36"} contentClass="gap-2 pb-1">
           <Each of={props.plan.todos}>
             {(todo) => (
-              <View class="flex-row items-start gap-2">
-                <Text class={`${type.meta} text-muted-foreground`}>{t(`interactions.${
-                  todo().status === "completed" ? "completed" : todo().status === "in_progress" ? "active" : "pending"}`)}</Text>
-                <Text class={`flex-1 ${type.ui} text-foreground`}>{todo().content}</Text>
+              <View class="flex-row items-center gap-2.5">
+                <Badge
+                  tone={todo().status === "completed" ? "success" : todo().status === "in_progress" ? "info" : "neutral"}
+                  label={t(`interactions.${todo().status === "completed" ? "completed" : todo().status === "in_progress" ? "active" : "pending"}`)}
+                />
+                <Text class={`flex-1 ${type.ui} ${todo().status === "completed" ? "text-muted-foreground" : "text-foreground"}`}>{todo().content}</Text>
               </View>
             )}
           </Each>
+          <If when={props.plan.todos.length > 0 && !!props.plan.markdown}>
+            <Separator />
+          </If>
           <If when={props.plan.markdown}>
-            {(markdown) => <View class="gap-1"><Text class={`${type.meta} text-muted-foreground`}>{t("interactions.approved")}</Text><Markdown text={markdown()} /></View>}
+            {(markdown) => (
+              <View class="gap-1">
+                <Text class={`${type.meta} font-medium text-muted-foreground`}>{t("interactions.approved")}</Text>
+                <Markdown text={markdown()} />
+              </View>
+            )}
           </If>
         </Scroll>
       </Disclosure>
@@ -94,7 +104,7 @@ function QuestionEditor(props: {
   };
   return (
     <Appear entrance="rise">
-      <Surface>
+      <Surface class="p-3.5 gap-2.5">
         <View class="flex-row items-center gap-2">
           <Text class={`flex-1 ${type.meta} font-semibold text-muted-foreground`}>{t("interactions.question", { current: props.index + 1, total: props.questions.length })}</Text>
           <If when={props.questions.length > 1}>
@@ -102,7 +112,7 @@ function QuestionEditor(props: {
             <IconButton icon="arrow-right" size="sm" label={t("interactions.next")} disabled={props.index + 1 === props.questions.length} onPress={() => props.move(props.index + 1)} />
           </If>
         </View>
-        <Scroll class="max-h-40" contentClass="gap-2 pb-1">
+        <Scroll class="max-h-32" contentClass="gap-2 pb-1">
           <Markdown text={props.question.title} />
           <If when={props.question.options.length > 0}>
             <If when={props.question.multiSelect} else={
@@ -179,7 +189,7 @@ export function SessionInteractions(props: { host: HostStore; sessionId: Session
     <If when={props.sessionId && !props.host.permissionFor(props.sessionId) && (questions().length || plan().markdown || plan().todos.length)}>
       <View class="gap-2">
         <If when={plan().markdown || plan().todos.length}>
-          <PlanCard plan={plan()} open={planOpen()} onToggle={() => planOpen.update((open) => !open)} />
+          <PlanCard plan={plan()} open={planOpen()} sharedSpace={questions().length > 0} onToggle={() => planOpen.update((open) => !open)} />
         </If>
         <Each of={current()} key={draftId}>
           {(question) => <QuestionEditor host={props.host} sessionId={props.sessionId!} question={question()} questions={questions()}

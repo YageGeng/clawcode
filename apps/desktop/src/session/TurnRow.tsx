@@ -2,7 +2,7 @@ import { computed, untracked, View } from "nsh";
 import { t } from "nsh/i18n";
 
 import type { MessageId, ToolCallId } from "../client/acp/protocol";
-import type { MessageEntity, TerminalEntity, ToolCallEntity } from "../client/domain/model";
+import type { FileChange, MessageEntity, TerminalEntity, ToolCallEntity } from "../client/domain/model";
 import type { TurnView, WorkStep } from "../client/turns";
 import { MessageBubble } from "../ui/bubble";
 import { Disclosure } from "../ui/disclosure";
@@ -10,6 +10,7 @@ import { Markdown } from "../ui/markdown";
 import { motionClass } from "../ui/motion";
 import { ChangeCard } from "./ChangeCard";
 import { MessageActions } from "./MessageActions";
+import type { ChangeOpener } from "./SessionView";
 import { AssistantContent } from "./ToolContent";
 import { ToolRow } from "./ToolRow";
 
@@ -104,7 +105,12 @@ function WorkRows(props: { steps: readonly WorkStep[]; source: TurnSource; runni
 }
 
 /** Shows the prompt and reply directly, with separate disclosures for work and changed files. */
-export function TurnRow(props: { turn: TurnView; source: TurnSource }) {
+export function TurnRow(props: {
+  turn: TurnView;
+  source: TurnSource;
+  selectedPath?: string;
+  onViewChange: (turnKey: string, file: FileChange, trigger?: ChangeOpener) => void;
+}) {
   const changesKey = () => `files:${props.turn.key}`;
   const lastWork = computed(() => props.turn.sections.findLast((section) => section.type === "work")?.key);
   const label = () => props.turn.running ? t("turn.working") : props.turn.durationMs === undefined
@@ -129,7 +135,7 @@ export function TurnRow(props: { turn: TurnView; source: TurnSource }) {
             return current.type === "work" ? current.steps : [];
           };
           return (
-            <Disclosure label={lastWork() === item.key ? label() : t("turn.work")} open={props.source.isOpen(item.key)}
+            <Disclosure flush label={lastWork() === item.key ? label() : t("turn.work")} open={props.source.isOpen(item.key)}
               onToggle={() => props.source.toggle(item.key)}
               trailing={<If when={props.turn.running && lastWork() === item.key}><Caret /></If>}>
               <WorkRows steps={steps()} source={props.source} running={props.turn.running} />
@@ -138,10 +144,16 @@ export function TurnRow(props: { turn: TurnView; source: TurnSource }) {
         }}
       </Each>
       <If when={props.turn.changes.length > 0}>
-        <Disclosure label={t("turn.changedFiles", { count: props.turn.changes.length })} open={props.source.isOpen(changesKey())}
+        <Disclosure flush label={t("turn.changedFiles", { count: props.turn.changes.length })} open={props.source.isOpen(changesKey())}
           onToggle={() => props.source.toggle(changesKey())}>
           <Each of={props.turn.changes} key={(change) => change.path}>
-            {(change) => <ChangeCard change={change()} />}
+            {(change) => (
+              <ChangeCard
+                change={change()}
+                selected={props.selectedPath === change().path}
+                onOpen={(trigger) => props.onViewChange(props.turn.key, change(), trigger)}
+              />
+            )}
           </Each>
         </Disclosure>
       </If>

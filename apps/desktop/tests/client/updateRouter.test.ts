@@ -90,6 +90,24 @@ function routedWorkspace(...sessionIds: SessionId[]) {
   };
 }
 
+test("full_replay_reuses_surviving_edits_and_drops_unreported_content", async () => {
+  const sessionId = "session" as SessionId;
+  const workspace = routedWorkspace(sessionId);
+  const call = { sessionUpdate: "tool_call_update", toolCallId: "call" as ToolCallId };
+  const a = { type: "diff", path: "file", oldText: "", newText: "A" };
+  const b = { ...a, newText: "B" };
+  const edits = () => workspace.session(sessionId).tools.get(call.toolCallId)!.changes;
+  workspace.send(sessionId, { ...call, content: [a, b] });
+  const selected = edits()[1];
+  await workspace.router.replay(sessionId, async () => {
+    workspace.send(sessionId, call, { ...call, content: [b] });
+  });
+  expect(edits().length).toBe(1);
+  expect(edits()[0] === selected).toBe(true);
+  await workspace.router.replay(sessionId, async () => { workspace.send(sessionId, call); });
+  expect(edits()).toEqual([]);
+});
+
 test("tool_input_output_and_content_patch_independently", () => {
   const id = "session" as SessionId;
   const workspace = routedWorkspace(id);

@@ -1,6 +1,5 @@
 import type { MessageId, ToolCallId } from "./acp/protocol";
-import { AcpProtocol } from "./acp/protocol";
-import type { FileChange } from "./domain/model";
+import type { FileChange, RecordedFileChange } from "./domain/model";
 import type { SessionWorkspaceState } from "./workspace/sessionState";
 
 /** One item inside a turn's folded work; `key` is stable while the turn grows. */
@@ -26,49 +25,6 @@ export type TurnView = Readonly<{
   /** The last entry's end minus the user message's start, once the turn ended. */
   durationMs?: number;
 }>;
-
-/** The files a tool's content changed with their added and removed line counts, from its `diff` items. */
-export function fileChanges(content: readonly unknown[]): readonly FileChange[] {
-  return content.flatMap((item): FileChange[] => {
-    const record = AcpProtocol.record(item);
-    if (record?.type !== "diff") return [];
-    if (typeof record.path === "string" && typeof record.newText === "string") {
-      return [{ path: record.path, ...lineCounts(typeof record.oldText === "string" ? record.oldText : "", record.newText) }];
-    }
-    // The built-in edit emits one git patch per destination. Count only the hunk body, including lines starting with +++ or ---.
-    const patch = AcpProtocol.record(record.patch);
-    const change = Array.isArray(record.changes) && record.changes.length === 1 ? AcpProtocol.record(record.changes[0]) : undefined;
-    if (patch?.format !== "git_patch" || typeof patch.text !== "string" || typeof change?.path !== "string") return [];
-    let added = 0, removed = 0, inHunk = false;
-    for (const line of patch.text.split("\n")) {
-      if (line.startsWith("diff --git ")) inHunk = false;
-      else if (line.startsWith("@@ ")) inHunk = true;
-      else if (inHunk && line.startsWith("+")) added++;
-      else if (inHunk && line.startsWith("-")) removed++;
-    }
-    return [{ path: change.path, added, removed }];
-  });
-}
-
-/**
- * Lines added and removed between two texts.
- * ponytail: multiset of lines (linear time), exact unless lines are reordered; use a real diff if counts must match git.
- */
-function lineCounts(oldText: string, newText: string): Readonly<{ added: number; removed: number }> {
-  // A final line break ends the last line; it does not start another one.
-  const split = (text: string) => (text === "" ? [] : (text.endsWith("\n") ? text.slice(0, -1) : text).split("\n"));
-  const remaining = new Map<string, number>();
-  for (const line of split(oldText)) remaining.set(line, (remaining.get(line) ?? 0) + 1);
-  let added = 0;
-  for (const line of split(newText)) {
-    const left = remaining.get(line) ?? 0;
-    if (left > 0) remaining.set(line, left - 1);
-    else added += 1;
-  }
-  let removed = 0;
-  for (const left of remaining.values()) removed += left;
-  return { added, removed };
-}
 
 /** A turn being collected: entries in order, plus the user message that opened it. */
 type Collecting = { userMessageId?: MessageId; entries: Array<Readonly<{ type: "message"; id: MessageId } | { type: "tool"; id: ToolCallId }>> };
@@ -132,7 +88,7 @@ function foldTurn(session: SessionWorkspaceState, turn: Collecting, index: numbe
     if (steps.length) sections.push({ type: "work", key: workKey, steps });
     steps = [];
   };
-  const changes = new Map<string, { added: number; removed: number }>();
+  const changes = new Map<string, { added: number; removed: number; edits: [RecordedFileChange, ...RecordedFileChange[]] }>();
   for (const item of turn.entries) {
     if (item.type === "message") {
       const message = session.messages.get(item.id);
@@ -154,8 +110,14 @@ function foldTurn(session: SessionWorkspaceState, turn: Collecting, index: numbe
     const tool = session.tools.get(item.id);
     steps.push({ type: "tool", key: `tool:${item.id}`, toolCallId: item.id });
     for (const change of tool?.changes ?? []) {
-      const merged = changes.get(change.path) ?? { added: 0, removed: 0 };
-      changes.set(change.path, { added: merged.added + change.added, removed: merged.removed + change.removed });
+      const existing = changes.get(change.path);
+      if (existing) {
+        existing.added += change.added;
+        existing.removed += change.removed;
+        existing.edits.push(change);
+      } else {
+        changes.set(change.path, { added: change.added, removed: change.removed, edits: [change] });
+      }
     }
   }
   flushWork();
@@ -190,7 +152,8 @@ function sameTurn(left: TurnView, right: TurnView): boolean {
     && left.durationMs === right.durationMs
     && sameItems(left.sections, right.sections, (a, b) => a.key === b.key &&
       (a.type !== "work" || (b.type === "work" && sameItems(a.steps, b.steps, (x, y) => x.key === y.key))))
-    && sameItems(left.changes, right.changes, (a, b) => a.path === b.path && a.added === b.added && a.removed === b.removed);
+    && sameItems(left.changes, right.changes, (a, b) => a.path === b.path && a.added === b.added && a.removed === b.removed &&
+      sameItems(a.edits, b.edits, (x, y) => x === y));
 }
 
 /** Whether two lists hold equal items in the same order. */

@@ -63,7 +63,7 @@ export type ToolCallEntity = Readonly<{
   /** The child Session a spawn tool started, once its result names it. */
   subagentSessionId?: SessionId;
   /** The files its `diff` content changed, counted once when the content arrives. */
-  changes: readonly FileChange[];
+  changes: readonly RecordedFileChange[];
   endedAtMs?: TimestampMs;
 }>;
 
@@ -78,8 +78,13 @@ export type TerminalEntity = Readonly<{
   pendingUtf8?: Uint8Array;
 }>;
 
-/** One file a tool changed, from its diff content. */
-export type FileChange = Readonly<{ path: string; added: number; removed: number }>;
+/** The native diff viewer accepts a Git patch or the two file versions from older ACP sessions. */
+export type RecordedDiff = Readonly<{ patch: string }> | Readonly<{ oldText: string; newText: string }>;
+type ChangeSummary = Readonly<{ path: string; added: number; removed: number }>;
+/** One edit has a stable ID within the session and keeps its own counts when grouped into a turn. */
+export type RecordedFileChange = ChangeSummary & Readonly<{ id: string; diff: RecordedDiff }>;
+/** The ordered edits for a single file within a single turn. */
+export type FileChange = ChangeSummary & Readonly<{ edits: readonly [RecordedFileChange, ...RecordedFileChange[]] }>;
 
 /** ACP tool kinds the agent reports; drives the tool group's icon and summary. */
 export type ToolKind = "read" | "edit" | "delete" | "move" | "search" | "execute" | "think" | "fetch" | "switch_mode" | "other";

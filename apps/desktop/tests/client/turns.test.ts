@@ -2,7 +2,8 @@ import { expect, test } from "nsh/test";
 
 import type { MessageId, TimestampMs, ToolCallId } from "../../src/client/acp/protocol";
 import type { MessageEntity, ToolCallEntity, ToolKind, TranscriptEntry } from "../../src/client/domain/model";
-import { fileChanges, TurnGroups } from "../../src/client/turns";
+import { fileChanges } from "../../src/client/fileChanges";
+import { TurnGroups } from "../../src/client/turns";
 import type { TurnView } from "../../src/client/turns";
 import { initialSessionWorkspaceState, reduceSessionWorkspace, SessionWorkspaceStager } from "../../src/client/workspace/sessionState";
 import type { SessionWorkspaceState } from "../../src/client/workspace/sessionState";
@@ -29,7 +30,7 @@ function tool(id: string, kind: ToolKind, content: unknown[] = [], endMs?: numbe
     title: `tool ${id}`,
     status: "completed",
     kind,
-    changes: fileChanges(content),
+    changes: fileChanges(id, content),
     ...(endMs === undefined ? {} : { endedAtMs: String(endMs) as TimestampMs }),
   };
   return [entity, { type: "tool", toolCallId: id as ToolCallId, order: { sequence: ++order, receivedOrder: order } }];
@@ -91,12 +92,27 @@ test("file_changes_count_lines_per_path", () => {
   const turns = groupTurns(session([
     message("u1", "user", "go", 1),
     tool("t1", "edit", [diff("src/a.rs", "x\ny", "x\nA\nB\nC")]),
-    tool("t2", "edit", [diff("src/a.rs", "keep", "keep\nD\nE")]),
+    tool("t2", "edit", [diff("src/a.rs", "keep\n", "keep\nD\nE")]),
     tool("t3", "edit", [diff("src/b.rs", "", "1\n2\n3\n4")]),
     message("a1", "assistant", "done", 9),
   ]));
-  expect(turns[0]!.changes).toEqual([{ path: "src/a.rs", added: 5, removed: 1 }, { path: "src/b.rs", added: 4, removed: 0 }]);
-  expect(fileChanges([{ type: "content", content: { type: "text", text: "read" } }])).toEqual([]);
+  expect(turns[0]!.changes.map(({ edits, ...counts }) => counts)).toEqual([{ path: "src/a.rs", added: 5, removed: 1 }, { path: "src/b.rs", added: 4, removed: 0 }]);
+  expect(turns[0]!.changes[0]!.edits.map((edit) => edit.diff)).toEqual([
+    { oldText: "x\ny", newText: "x\nA\nB\nC" }, { oldText: "keep\n", newText: "keep\nD\nE" },
+  ]);
+  expect(fileChanges("read", [{ type: "content", content: { type: "text", text: "read" } }])).toEqual([]);
+});
+
+test("a_corrected_historical_patch_refreshes_the_inspector_when_line_counts_match", () => {
+  const [edit, entry] = tool("edit", "edit", [diff("src/a.rs", "old", "first")]);
+  const state = session([message("u1", "user", "edit", 1), [edit, entry], message("u2", "user", "continue", 2)]);
+  const groups = new TurnGroups();
+  const original = groups.update(state);
+  const corrected = reduceSessionWorkspace(state, { type: "tool/upserted", order: entry.order,
+    tool: { ...edit, changes: fileChanges(edit.toolCallId, [diff("src/a.rs", "old", "corrected")], edit.changes) } });
+  const updated = groups.update(corrected);
+  expect(updated[0]!.changes[0]!.edits.map((edit) => edit.diff)).toEqual([{ oldText: "old", newText: "corrected" }]);
+  expect(updated[1] === original[1]).toBe(true);
 });
 
 test("thought_only_and_tool_only_messages_keep_their_place_without_an_empty_answer", () => {
@@ -108,13 +124,33 @@ test("thought_only_and_tool_only_messages_keep_their_place_without_an_empty_answ
   ]));
   expect(workSteps(ended!).map((step) => step.key)).toEqual(["thought:a1", "tool:t1", "tool:t2"]);
   expect(ended?.sections.map((section) => section.type)).toEqual(["work"]);
-  expect(ended?.changes).toEqual([{ path: "f", added: 1, removed: 0 }]);
+  expect(ended?.changes[0]?.edits[0].diff).toEqual({ oldText: "", newText: "fixed" });
 });
 
-test("a_file_ending_in_a_newline_counts_its_lines", () => {
-  // Most files end with a line break; it closes the last line and is not a line of its own.
-  expect(fileChanges([diff("new.txt", "", "1\n2\n3\n4\n")])).toEqual([{ path: "new.txt", added: 4, removed: 0 }]);
-  expect(fileChanges([diff("gone.txt", "a\nb\n", "")])).toEqual([{ path: "gone.txt", added: 0, removed: 2 }]);
+test("snapshot_counts_match_ordered_lines_including_their_line_terminators", () => {
+  const cases = [
+    { old: "", next: "1\n2\n3\n4\n", added: 4, removed: 0 },
+    { old: "a\nb\n", next: "", added: 0, removed: 2 },
+    { old: "a\nb\n", next: "b\na\n", added: 1, removed: 1 },
+    { old: "a\nb\na\n", next: "a\na\nb\n", added: 1, removed: 1 },
+    { old: "a\n", next: "a", added: 1, removed: 1 },
+  ];
+  for (const item of cases) {
+    const [edit] = fileChanges("edit", [diff("file", item.old, item.next)]);
+    expect([edit!.added, edit!.removed]).toEqual([item.added, item.removed]);
+  }
+});
+
+test("tool_corrections_preserve_unchanged_edits_and_reuse_identical_updates", () => {
+  const a = diff("same.rs", "old", "a"), b = diff("same.rs", "old", "b"), c = diff("same.rs", "old", "c");
+  const edits = fileChanges("tool", [a, b, c]);
+  expect(fileChanges("tool", [a, b, c], edits) === edits).toBe(true);
+  const reordered = fileChanges("tool", [c, b], edits);
+  expect(reordered[0] === edits[2]).toBe(true);
+  expect(reordered[1] === edits[1]).toBe(true);
+  const corrected = fileChanges("tool", [b, diff("same.rs", "old", "corrected")], reordered);
+  expect(corrected[0] === edits[1]).toBe(true);
+  expect(corrected[1]!.id).toBe(edits[2]!.id);
 });
 
 test("a_streamed_token_redraws_no_turn", () => {

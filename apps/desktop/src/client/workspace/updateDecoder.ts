@@ -3,7 +3,7 @@ import { AcpProtocol } from "../acp/protocol";
 import { decodeSessionConfig } from "../acp/sessionConfig";
 import type { EventMeta, MessageId, SessionId, SessionUpdateNotification, TimestampMs } from "../acp/protocol";
 import type { EventOrder, MessageAttachment, MessageEntity, SessionNotice, ToolCallEntity, ToolKind } from "../domain/model";
-import { fileChanges } from "../turns";
+import { fileChanges } from "../fileChanges";
 import { interactionUpdate, questionDecisions } from "./interactions";
 import type { SessionEntities, SessionWorkspaceAction } from "./sessionState";
 import type { WorkspaceAction } from "./state";
@@ -21,6 +21,8 @@ type UpdateContext = Readonly<{
   productMeta: Record<string, unknown> | undefined;
   order: EventOrder;
   entities: SessionEntities;
+  /** Published edits can match replayed payloads even while the new branch is still being assembled. */
+  publishedTools?: SessionEntities["tools"];
 }>;
 
 const TOOL_KINDS: ReadonlySet<ToolKind> = new Set<ToolKind>(["read", "edit", "delete", "move", "search", "execute", "think", "fetch", "switch_mode", "other"]);
@@ -79,7 +81,7 @@ export class SessionUpdateDecoder {
   }
 
   /** Decodes one ACP notification while preserving omitted-field upsert semantics. */
-  decode(notification: SessionUpdateNotification, entities: SessionEntities, receivedOrder: number): DecodedSessionUpdate {
+  decode(notification: SessionUpdateNotification, entities: SessionEntities, receivedOrder: number, publishedTools?: SessionEntities["tools"]): DecodedSessionUpdate {
     const update = notification.update;
     const kind = update.sessionUpdate;
     if (kind === `_${this.namespace}/event` && AcpProtocol.record(update.payload)?.event === "branch_navigated") {
@@ -130,7 +132,7 @@ export class SessionUpdateDecoder {
       meta,
       productMeta: AcpProtocol.productMeta(rawMeta, this.namespace) ?? AcpProtocol.productMeta(content?._meta, this.namespace),
       order: { sequence: meta?.sequence ?? receivedOrder, receivedOrder },
-      entities
+      entities, publishedTools
     };
     if (kind === `_${this.namespace}/event`) {
       const event = AcpProtocol.record(update.payload);
@@ -282,6 +284,9 @@ export class SessionUpdateDecoder {
       ? shareMediaBytes(contentPatch ?? previous?.content, rawOutput) : previous?.content;
     const subagentSessionId = this.subagentSessionId(update.rawOutput) ?? previous?.subagentSessionId;
     const ended = status === "completed" || status === "failed" || status === "cancelled";
+    // A fresh replay can reuse a matching edit from the published view. Only replayed content restores an edit.
+    const changes = previous?.changes ?? [];
+    const previousEdits = changes.length ? changes : context.publishedTools?.get(toolCallId)?.changes;
     const tool: ToolCallEntity = {
       toolCallId,
       title: typeof update.title === "string" ? update.title : update.title === null ? update.toolCallId : previous?.title ?? update.toolCallId,
@@ -293,8 +298,7 @@ export class SessionUpdateDecoder {
       ...(kind === undefined ? {} : { kind }),
       // A discovered child stays even when a later cancellation carries no details.
       ...(subagentSessionId === undefined ? {} : { subagentSessionId }),
-      // A metadata-only patch leaves both the payload and its computed file counts intact.
-      changes: contentPatch === undefined ? previous?.changes ?? [] : fileChanges(contentPatch),
+      changes: contentPatch === undefined ? changes : fileChanges(toolCallId, contentPatch, previousEdits),
       ...(ended ? { endedAtMs: previous?.endedAtMs ?? meta?.timestampMs } : {})
     };
     return { type: "tool/upserted", tool, order: context.order };

@@ -48,7 +48,7 @@ export function SidebarRowView(props: { row: SidebarRow; context: RowContext }) 
   return (
     <View>
       <If when={props.row.kind === "heading" ? props.row.label : undefined}>
-        {(label) => <Text class="px-2.5 pt-4 pb-1 text-[11px] leading-[16px] font-semibold uppercase tracking-wider text-muted-foreground">{label()}</Text>}
+        {(label) => <Text class="px-2.5 pt-4 pb-1 text-xs leading-4 font-semibold tracking-wide text-muted-foreground">{label()}</Text>}
       </If>
       <If when={workspace()}>
         {(group) => (

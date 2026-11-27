@@ -1,4 +1,6 @@
-import { effect, signal, Text, View } from "nsh";
+import { WindowControls } from "clawcode-backend";
+import { effect, platform, signal, Text, View } from "nsh";
+import { currentWindow, isAvailable } from "nsh/desktop";
 import { t } from "nsh/i18n";
 
 import { messageOf } from "../client/errors";
@@ -18,12 +20,43 @@ import { Toasts, ToastStore } from "../ui/toast";
 import { type } from "../ui/tokens";
 import { EmptyState } from "./EmptyState";
 import { Sidebar } from "./Sidebar";
-import { TitleBar } from "./TitleBar";
+import { TITLE_BAR_HEIGHT, TitleBar } from "./TitleBar";
 import { groupByWorkspace } from "./workspaces";
+
+/** Minimum desktop window size, matching `nsh.json`'s `window.minSize`. */
+const MIN_WINDOW_SIZE = { width: 800, height: 560 } as const;
+
+/** Applies desktop chrome and size constraints. NSH restores the saved bounds at launch. */
+function configureShellWindow(): void {
+  if (!isAvailable) return;
+  if (platform.os === "linux") WindowControls.styleTitleBar();
+  const win = currentWindow();
+  win.set({
+    title: "Clawcode",
+    minSize: MIN_WINDOW_SIZE,
+    titleBar: { style: "hidden", height: TITLE_BAR_HEIGHT },
+  });
+  // Some hosts create the window before applying minSize. Clamp its first reported size per axis.
+  let checkedLaunchBounds = false;
+  effect(() => {
+    if (checkedLaunchBounds) return;
+    const state = win.state();
+    if (!state) return;
+    checkedLaunchBounds = true;
+    const { width, height } = state.contentBounds.size;
+    if (width < MIN_WINDOW_SIZE.width || height < MIN_WINDOW_SIZE.height) {
+      win.setBounds({ size: {
+        width: Math.max(width, MIN_WINDOW_SIZE.width),
+        height: Math.max(height, MIN_WINDOW_SIZE.height),
+      } });
+    }
+  });
+}
 
 /** The window: title bar, sidebar and the main area (a Session, the empty state, or the host's state). */
 export function Shell(props: { store: AppStore; settings: SettingsStore; remote?: RemoteStore }) {
   configureDesktopFonts();
+  configureShellWindow();
   const sidebarOpen = signal(true);
   const settingsOpen = signal(false);
   // The working directory a new Session starts in; the newest workspace until the user picks one.
@@ -72,11 +105,11 @@ export function Shell(props: { store: AppStore; settings: SettingsStore; remote?
           if (host().info.kind !== "local") props.store.selectHost("local");
           navigateRemote("sharing");
         }} />
-      <View class="flex-1 flex-row">
+      <View class="min-h-0 flex-1 flex-row">
         <If when={sidebarOpen()}>
           <Sidebar store={props.store} onAddHost={addHost} onOpenSettings={() => settingsOpen.set(true)} />
         </If>
-        <View class={`flex-1 bg-background ${sidebarOpen() ? "rounded-tl-(--radius-lg) border-l border-t border-border" : "border-t border-border"}`}>
+        <View class={`min-w-0 flex-1 overflow-hidden bg-background ${sidebarOpen() ? "rounded-tl-(--radius-lg) border-l border-t border-border" : "border-t border-border"}`}>
           <If when={host().phase().kind === "starting"}>
             <View class="flex-1 items-center justify-center">
               <Text class={`${type.ui} text-muted-foreground`}>{t("shell.starting")}</Text>
@@ -121,7 +154,13 @@ export function Shell(props: { store: AppStore; settings: SettingsStore; remote?
               {/* Keyed by host and Session: `If` keeps its branch while it stays truthy, so without the key one view
                   (its draft, scroll anchor and jump state) would carry over into the next Session. */}
               <Each of={[openSessionId()!]} key={(id) => `${host().info.id}\n${id}`}>
-                {(sessionId) => <SessionView host={host()} sessionId={sessionId()} />}
+                {(sessionId) => (
+                  <SessionView
+                    host={host()}
+                    sessionId={sessionId()}
+                    modalOpen={settingsOpen() || remotePage() !== null || !!props.remote?.snapshot?.pending.length}
+                  />
+                )}
               </Each>
             </If>
           </If>

@@ -10,6 +10,19 @@ function openShell(modules?: Record<string, Record<string, unknown>>) {
   });
 }
 
+test("shell_preserves_restored_bounds_at_the_minimum_width", async () => {
+  // The Linux dev host may have the same height as a valid user-saved window.
+  const app = await open("../entries/shell.tsx", { ...DESKTOP, width: 800, height: 844 });
+  await app.waitFor("text:What should we build in");
+  expect(app.window("main").state()?.contentBounds.size).toEqual({ width: 800, height: 844 });
+});
+
+test("shell_clamps_only_the_undersized_launch_dimension", async () => {
+  const app = await open("../entries/shell.tsx", { ...DESKTOP, width: 390, height: 844 });
+  await app.waitFor("text:What should we build in");
+  expect(app.window("main").state()?.contentBounds.size).toEqual({ width: 800, height: 844 });
+});
+
 test("sidebar_groups_sessions_by_workspace", async () => {
   const app = await openShell();
   await app.waitFor("text:alpha");

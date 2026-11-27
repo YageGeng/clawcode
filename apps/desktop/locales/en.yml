@@ -60,6 +60,15 @@ time:
   seconds: "%{s}s"
   minutesSeconds: "%{m}m %{s}s"
 changes:
+  turn: Turn %{number}
+  view: View changes
+  viewFile: View changes to %{path}
+  title: Changes
+  close: Close changes
+  resize: Resize changes panel
+  editIndex: Edit %{current} of %{total}
+  previous: Previous edit
+  next: Next edit
   edited: Edited %{file}
 composer:
   label: Message
