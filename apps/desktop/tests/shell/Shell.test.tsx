@@ -74,7 +74,14 @@ test("an_offline_retry_keeps_the_open_transcript_and_unsent_draft_on_screen", as
   expect(app.value("label:Message")).toBe("Unsent draft");
   expect(app.enabled("label:Send")).toBe(false);
   await app.press("text:Fail retry");
-  await app.waitFor("text:Retry");
+  // The connection state sits at the right of the Session header instead of a banner row above it.
+  await app.waitFor("label:Retry");
+  expect(app.shows("text:Offline")).toBe(true);
+  expect(app.shows("text:Workstation is offline. retry failed")).toBe(false);
+  const retry = app.layout("label:Retry")!;
+  // The sidebar's navigation row is level with the Session header.
+  const title = app.layout("label:Toggle sidebar")!;
+  expect(Math.abs(retry.y + retry.height / 2 - (title.y + title.height / 2)) <= 2).toBe(true);
   await app.waitFor("text:Saved transcript");
   expect(app.value("label:Message")).toBe("Unsent draft");
 });
@@ -239,4 +246,23 @@ test("new_session_ignores_late_preparation_on_the_same_blank_page", async () => 
   expect(app.shows("text:Allow external writes")).toBe(false);
   await app.type("label:Message", "/");
   await app.waitFor("text:/second");
+});
+
+test("a_collapsed_sidebar_can_reopen_while_the_open_sessions_host_has_failed", async () => {
+  const app = await open("../entries/failed-host-session.tsx", DESKTOP);
+  await app.waitFor("text:Backend failed to start: config file not found");
+  await app.press("label:Toggle sidebar");
+  // The sidebar is gone, so its toggle must now lead the main area.
+  await app.waitFor("label:Toggle sidebar");
+  expect(app.count("label:Toggle sidebar")).toBe(1);
+});
+
+test("the_navigation_buttons_stay_put_when_the_sidebar_collapses", async () => {
+  const app = await open("../entries/session-details.tsx", DESKTOP);
+  await app.waitFor("text:Started two helpers.");
+  const expanded = app.layout("label:Toggle sidebar")!;
+  await app.press("label:Toggle sidebar");
+  await app.waitUntil(() => !app.shows("text:New session"));
+  const collapsed = app.layout("label:Toggle sidebar")!;
+  expect([collapsed.x, collapsed.y]).toEqual([expanded.x, expanded.y]);
 });

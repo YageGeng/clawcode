@@ -1,0 +1,34 @@
+# Native Shell from its nightly build: the commit `nsh --version` shows for the nightly CLI.
+#
+# The root Cargo.toml keeps the crates.io release. A `[patch]` there would not reach the workspace NSH generates for
+# the desktop app's hosts and test runner (`apps/desktop/.nsh/rust`), so the patch lives here, where every cargo and
+# `nsh` command run in this repository reads it. Every nsh crate those builds use is patched to the same commit: a
+# mix of releases and `main` does not compile. Cargo warns that most are unused in the root workspace.
+# Delete this file to return to the crates.io release.
+[patch.crates-io]
+nsh-base             = { git = "https://github.com/longbridge/nsh", rev = "54ca221" }
+nsh-core             = { git = "https://github.com/longbridge/nsh", rev = "54ca221" }
+nsh-dev              = { git = "https://github.com/longbridge/nsh", rev = "54ca221" }
+nsh-engine           = { git = "https://github.com/longbridge/nsh", rev = "54ca221" }
+nsh-gpu              = { git = "https://github.com/longbridge/nsh", rev = "54ca221" }
+nsh-i18n             = { git = "https://github.com/longbridge/nsh", rev = "54ca221" }
+nsh-ios-app          = { git = "https://github.com/longbridge/nsh", rev = "54ca221" }
+nsh-ios-host         = { git = "https://github.com/longbridge/nsh", rev = "54ca221" }
+nsh-js               = { git = "https://github.com/longbridge/nsh", rev = "54ca221" }
+nsh-linux-app        = { git = "https://github.com/longbridge/nsh", rev = "54ca221" }
+nsh-linux-host       = { git = "https://github.com/longbridge/nsh", rev = "54ca221" }
+nsh-macos-app        = { git = "https://github.com/longbridge/nsh", rev = "54ca221" }
+nsh-macos-host       = { git = "https://github.com/longbridge/nsh", rev = "54ca221" }
+nsh-macros           = { git = "https://github.com/longbridge/nsh", rev = "54ca221" }
+nsh-package          = { git = "https://github.com/longbridge/nsh", rev = "54ca221" }
+nsh-platform-android = { git = "https://github.com/longbridge/nsh", rev = "54ca221" }
+nsh-platform-apple   = { git = "https://github.com/longbridge/nsh", rev = "54ca221" }
+nsh-platform-ios     = { git = "https://github.com/longbridge/nsh", rev = "54ca221" }
+nsh-platform-linux   = { git = "https://github.com/longbridge/nsh", rev = "54ca221" }
+nsh-platform-macos   = { git = "https://github.com/longbridge/nsh", rev = "54ca221" }
+nsh-platform-web     = { git = "https://github.com/longbridge/nsh", rev = "54ca221" }
+nsh-platform-windows = { git = "https://github.com/longbridge/nsh", rev = "54ca221" }
+nsh-testing          = { git = "https://github.com/longbridge/nsh", rev = "54ca221" }
+nsh-updater          = { git = "https://github.com/longbridge/nsh", rev = "54ca221" }
+nsh-windows-app      = { git = "https://github.com/longbridge/nsh", rev = "54ca221" }
+nsh-windows-host     = { git = "https://github.com/longbridge/nsh", rev = "54ca221" }

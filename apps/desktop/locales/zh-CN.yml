@@ -45,6 +45,17 @@ shell:
   newSession: 新会话
   workspaces: 工作区
   recent: 最近
+  pinned: 已置顶
+  rename: 重命名
+  renameField: 会话标题
+  renameFailed: 无法重命名会话
+  pin: 置顶
+  unpin: 取消置顶
+  delete: 删除
+  deleteTitle: "删除「%{title}」？"
+  deleteDetail: 这个会话的对话记录会从主机上删除。
+  deleteFailed: 无法删除会话
+  sessionActions: "%{title} 的操作"
   settings: 设置
   back: 后退
   forward: 前进
@@ -72,6 +83,7 @@ turn:
   changedFiles: "%{count} 个文件已更改"
   workedFor: 用时 %{duration}
   working: 正在工作
+  workingFor: "已工作 %{duration}"
 time:
   seconds: "%{s} 秒"
   minutesSeconds: "%{m} 分 %{s} 秒"
@@ -88,6 +100,22 @@ changes:
   next: 下一次编辑
   backToList: 全部变更文件
   edited: 已编辑 %{file}
+details:
+  title: 会话详情
+  openFileManager: 在文件管理器中打开
+  fileManager: 文件管理器
+  openIn: "在 %{target} 中打开"
+  chooseEditor: 选择编辑器
+  openFailed: "无法打开工作区：%{detail}"
+  related: 会话关系
+  relatedRunning: "会话关系 · %{count} 个运行中"
+  forkedFrom: 分叉自
+  parentAgent: 父智能体
+  runningRow: "%{name}，运行中"
+  justNow: 刚刚
+  minutes: "%{n} 分钟"
+  hours: "%{n} 小时"
+  days: "%{n} 天"
 files:
   hide: 收起工作区面板
   title: 文件

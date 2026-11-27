@@ -7,7 +7,14 @@ export type SessionSummary = Readonly<{
   title: string;
   createdAtMs?: TimestampMs;
   modifiedAtMs?: TimestampMs;
+  /** The Session this one was forked from. */
+  parentSessionId?: SessionId;
+  /** The Session that spawned this one as a named subagent. */
+  owner?: SessionOwner;
 }>;
+
+/** The owner edge of a delegated Session: who spawned it and under which names. */
+export type SessionOwner = Readonly<{ sessionId: SessionId; name: string; nickname: string }>;
 
 /** Where an update sits in a Session: the kernel sequence, ties broken by arrival. */
 export type EventOrder = Readonly<{

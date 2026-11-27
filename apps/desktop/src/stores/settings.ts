@@ -24,16 +24,22 @@ export const LANGUAGES = ["system", "en", "zh-CN"] as const;
 /** The interface language. */
 export type Language = (typeof LANGUAGES)[number];
 
+/** The `openIn` value that opens a workspace in the system file manager. */
+export const FILE_MANAGER = "file-manager";
+
 /** What the settings dialog changes. */
 export type Settings = IconThemeConfig & Readonly<{
   appearance: Appearance;
   language: Language;
+  /** Where "Open in" opens a local workspace: an editor command name, or `FILE_MANAGER`. */
+  openIn: string;
 }>;
 
 /** The settings before the user changed any. */
 export const DEFAULT_SETTINGS: Settings = {
   appearance: "system",
   language: "system",
+  openIn: FILE_MANAGER,
   ...DEFAULT_ICON_THEME_CONFIG,
 };
 
@@ -64,6 +70,8 @@ function parse(saved: string | null): Settings {
     return {
       appearance: pickKnown(APPEARANCES, value.appearance, DEFAULT_SETTINGS.appearance),
       language: pickKnown(LANGUAGES, value.language, DEFAULT_SETTINGS.language),
+      // Installed editors vary per computer, so only the shape of a command name is checked here.
+      openIn: typeof value.openIn === "string" && /^[a-z-]{1,32}$/.test(value.openIn) ? value.openIn : DEFAULT_SETTINGS.openIn,
       iconTheme: pickKnown(ICON_THEME_SELECTIONS, value.iconTheme, DEFAULT_SETTINGS.iconTheme),
       iconThemeMode: pickKnown(ICON_THEME_MODES, value.iconThemeMode, DEFAULT_SETTINGS.iconThemeMode),
       lightIconTheme: pickKnown(ICON_THEMES, value.lightIconTheme, DEFAULT_SETTINGS.lightIconTheme),

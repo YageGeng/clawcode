@@ -1,5 +1,4 @@
-import { WindowControls } from "clawcode-backend";
-import { effect, platform, signal, Text, View } from "nsh";
+import { effect, signal, Text, View } from "nsh";
 import { currentWindow, isAvailable } from "nsh/desktop";
 import { t } from "nsh/i18n";
 
@@ -8,19 +7,22 @@ import { RemoteDialogs } from "../remote/RemoteDialogs";
 import type { RemotePage } from "../remote/RemoteDialogs";
 import { remoteError } from "../stores/remote";
 import type { RemoteStore } from "../stores/remote";
-import { Button } from "../ui/button";
+import { Button, IconButton } from "../ui/button";
 import { SessionView } from "../session/SessionView";
 import { SettingsDialog } from "../settings/SettingsDialog";
 import type { AppStore } from "../stores/app";
 import type { HostFailure, HostPhase } from "../stores/host";
+import { createPinStore } from "../stores/pins";
 import type { SettingsStore } from "../stores/settings";
 import { configureDesktopFonts } from "../ui/fonts";
+import { Tooltip } from "../ui/menu";
 import { glideNextLayout } from "../ui/motion";
+import { StatusDot } from "../ui/surface";
 import { Toasts, ToastStore } from "../ui/toast";
-import { type } from "../ui/tokens";
+import { focusRing, type } from "../ui/tokens";
 import { EmptyState } from "./EmptyState";
 import { Sidebar } from "./Sidebar";
-import { TITLE_BAR_HEIGHT, TitleBar } from "./TitleBar";
+import { NavBar } from "./NavBar";
 import { groupByWorkspace } from "./workspaces";
 
 /** Minimum desktop window size, matching `nsh.json`'s `window.minSize`. */
@@ -29,12 +31,12 @@ const MIN_WINDOW_SIZE = { width: 800, height: 560 } as const;
 /** Applies desktop chrome and size constraints. NSH restores the saved bounds at launch. */
 function configureShellWindow(): void {
   if (!isAvailable) return;
-  if (platform.os === "linux") WindowControls.styleTitleBar();
   const win = currentWindow();
+  // The system draws the title bar (KDE's own on Wayland): its buttons, menu and double click match every other window.
   win.set({
     title: "Clawcode",
     minSize: MIN_WINDOW_SIZE,
-    titleBar: { style: "hidden", height: TITLE_BAR_HEIGHT },
+    titleBar: { style: "default" },
   });
   // Some hosts create the window before applying minSize. Clamp its first reported size per axis.
   let checkedLaunchBounds = false;
@@ -53,7 +55,8 @@ function configureShellWindow(): void {
   });
 }
 
-/** The window: title bar, sidebar and the main area (a Session, the empty state, or the host's state). */
+/** The window below the system title bar: the sidebar headed by navigation, and the main area (a Session, the empty
+ * state, or the host's state). */
 export function Shell(props: { store: AppStore; settings: SettingsStore; remote?: RemoteStore }) {
   configureDesktopFonts();
   configureShellWindow();
@@ -71,6 +74,8 @@ export function Shell(props: { store: AppStore; settings: SettingsStore; remote?
   };
   const addHost = props.remote ? () => navigateRemote("pair") : undefined;
   const openSessionId = () => props.store.location().sessionId;
+  // Only these phases mount the open Session's view; any other phase shows a status in its place.
+  const sessionShown = () => openSessionId() !== null && ["ready", "offline", "reconnecting"].includes(host().phase().kind);
   /** Why the host is not ready in `kind`, in the interface language; `undefined` in any other phase. */
   const failureText = (kind: "failed" | "offline") => {
     const phase = host().phase();
@@ -84,6 +89,9 @@ export function Shell(props: { store: AppStore; settings: SettingsStore; remote?
   const retry = () => props.remote?.connect(host().info);
   // The host's notices (a prompt that was not sent) show as toasts; each leaves the host once shown.
   const toasts = new ToastStore();
+  // Pins live on this device: the host has no notion of them.
+  const pins = createPinStore();
+  void pins.load();
   effect(() => {
     for (const notice of host().notices()) {
       toasts.show({ title: notice.title, description: notice.description, tone: "danger" });
@@ -91,6 +99,46 @@ export function Shell(props: { store: AppStore; settings: SettingsStore; remote?
     }
   });
 
+  /**
+   * The host connection as the Session header shows it: a tinted pulsing pill while reconnecting; a focusable danger
+   * pill (carrying the reason in its own tooltip, separate from the retry button) once offline. Nothing while connected.
+   */
+  const connection = () => {
+    if (host().phase().kind === "reconnecting") {
+      return (
+        <View role="alert" class="flex-row items-center rounded-full bg-warning/10 px-2 py-0.5">
+          <StatusDot tone="warning" live label={t("remote.status.reconnecting")} />
+        </View>
+      );
+    }
+    const reason = failureText("offline");
+    if (reason === undefined) return undefined;
+    return (
+      <View role="alert" class="flex-row items-center gap-1">
+        <View
+          focusable
+          accessibilityLabel={t("remote.status.offline")}
+          accessibilityHint={reason}
+          tooltip={<Tooltip text={reason} />}
+          class={`flex-row items-center rounded-full bg-destructive/10 px-2 py-0.5 ${focusRing}`}
+        >
+          <StatusDot tone="danger" label={t("remote.status.offline")} />
+        </View>
+        <If when={host().info.kind === "remote"}>
+          <IconButton icon="refresh-cw" size="sm" label={t("remote.retry")} tooltip={<Tooltip text={t("remote.retry")} />} onPress={retry} />
+        </If>
+      </View>
+    );
+  };
+  /** The navigation row: it heads the sidebar, or the main area while the sidebar is hidden. */
+  const nav = () => (
+    <NavBar store={props.store} onToggleSidebar={toggleSidebar}
+      connected={props.remote?.snapshot?.enabled ? props.remote.snapshot.online.length : undefined}
+      onShowDevices={() => {
+        if (host().info.kind !== "local") props.store.selectHost("local");
+        navigateRemote("sharing");
+      }} />
+  );
   /** Shows or hides the sidebar, gliding the layout unless the user asked for less motion. */
   const toggleSidebar = () => {
     glideNextLayout();
@@ -99,17 +147,16 @@ export function Shell(props: { store: AppStore; settings: SettingsStore; remote?
 
   return (
     <View class="flex-1 bg-sidebar">
-      <TitleBar store={props.store} onToggleSidebar={toggleSidebar}
-        connected={props.remote?.snapshot?.enabled ? props.remote.snapshot.online.length : undefined}
-        onShowDevices={() => {
-          if (host().info.kind !== "local") props.store.selectHost("local");
-          navigateRemote("sharing");
-        }} />
       <View class="min-h-0 flex-1 flex-row">
         <If when={sidebarOpen()}>
-          <Sidebar store={props.store} onAddHost={addHost} onOpenSettings={() => settingsOpen.set(true)} />
+          <Sidebar header={nav()} store={props.store} pins={pins} onAddHost={addHost} onOpenSettings={() => settingsOpen.set(true)}
+            onError={(title, description) => toasts.show({ title, description, tone: "danger" })} />
         </If>
-        <View class={`min-w-0 flex-1 overflow-hidden bg-background ${sidebarOpen() ? "rounded-tl-(--radius-lg) border-l border-t border-border" : "border-t border-border"}`}>
+        {/* Below the system title bar the sidebar and the main area meet flush; one vertical line divides them. */}
+        <View class={`min-w-0 flex-1 overflow-hidden bg-background ${sidebarOpen() ? "border-l border-border" : ""}`}>
+          {/* Without the sidebar, the navigation buttons lead the main area's first row: the Session header's when one
+              is shown, otherwise their own row above whatever status replaces it. */}
+          <If when={!sidebarOpen() && !sessionShown()}>{nav()}</If>
           <If when={host().phase().kind === "starting"}>
             <View class="flex-1 items-center justify-center">
               <Text class={`${type.ui} text-muted-foreground`}>{t("shell.starting")}</Text>
@@ -125,8 +172,9 @@ export function Shell(props: { store: AppStore; settings: SettingsStore; remote?
               </View>
             )}
           </If>
-          {/* Lost after it was ready: say why above the Sessions, which stay on screen (a resend fails into a notice). */}
-          <If when={failureText("offline")}>
+          {/* Lost after it was ready: say why above the Sessions, which stay on screen (a resend fails into a notice).
+              An open Session shows the same state compactly in its header instead. */}
+          <If when={sessionShown() ? undefined : failureText("offline")}>
             {(reason) => (
               <View role="alert" class="border-b border-border px-6 py-2">
                 <Text class={`${type.ui} text-destructive`}>{reason()}</Text>
@@ -136,7 +184,7 @@ export function Shell(props: { store: AppStore; settings: SettingsStore; remote?
               </View>
             )}
           </If>
-          <If when={host().phase().kind === "reconnecting"}>
+          <If when={!sessionShown() && host().phase().kind === "reconnecting"}>
             <Text class={`${type.ui} text-muted-foreground px-6 py-2`}>{t("remote.status.reconnecting")}</Text>
           </If>
           <If when={["ready", "offline", "reconnecting"].includes(host().phase().kind)}>
@@ -158,6 +206,11 @@ export function Shell(props: { store: AppStore; settings: SettingsStore; remote?
                   <SessionView
                     host={host()}
                     sessionId={sessionId()}
+                    settings={props.settings}
+                    deviceName={props.remote?.snapshot?.name}
+                    onOpenSession={(id) => props.store.openSession(host().info.id, id)}
+                    leading={sidebarOpen() ? undefined : nav()}
+                    status={connection()}
                     modalOpen={settingsOpen() || remotePage() !== null || !!props.remote?.snapshot?.pending.length}
                   />
                 )}

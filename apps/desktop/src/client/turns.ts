@@ -24,6 +24,8 @@ export type TurnView = Readonly<{
   /** Cumulative lines added and removed by all recorded edits in this turn. */
   lineCounts: Pick<FileChange, "added" | "removed">;
   running: boolean;
+  /** When the user message that opened the turn started, so a running turn can show how long it has worked. */
+  startedAtMs?: number;
   /** The last entry's end minus the user message's start, once the turn ended. */
   durationMs?: number;
 }>;
@@ -137,15 +139,21 @@ function foldTurn(session: SessionWorkspaceState, turn: Collecting, index: numbe
     changes: files,
     lineCounts,
     running,
+    ...startOf(session, turn),
     ...(running ? {} : durationOf(session, turn)),
   };
 }
 
+/** The start of the user message that opened the turn, when it has one with a valid time. */
+function startOf(session: SessionWorkspaceState, turn: Collecting): Readonly<{ startedAtMs?: number }> {
+  const start = turn.userMessageId === undefined ? NaN : Number(session.messages.get(turn.userMessageId)?.startedAtMs);
+  return Number.isFinite(start) ? { startedAtMs: start } : {};
+}
+
 /** Measures a finished turn from its user message to the latest timestamp in its entries. */
 function durationOf(session: SessionWorkspaceState, turn: Collecting): Readonly<{ durationMs?: number }> {
-  if (turn.userMessageId === undefined) return {};
-  const start = Number(session.messages.get(turn.userMessageId)?.startedAtMs);
-  if (!Number.isFinite(start)) return {};
+  const start = startOf(session, turn).startedAtMs;
+  if (start === undefined) return {};
   let end = -Infinity;
   for (const entry of turn.entries) {
     const entity = entry.type === "message" ? session.messages.get(entry.id) : session.tools.get(entry.id);
@@ -160,6 +168,7 @@ function sameTurn(left: TurnView, right: TurnView): boolean {
   return left.userMessageId === right.userMessageId
     && left.running === right.running
     && left.durationMs === right.durationMs
+    && left.startedAtMs === right.startedAtMs
     && sameItems(left.sections, right.sections, (a, b) => a.key === b.key &&
       (a.type !== "work" || (b.type === "work" && sameItems(a.steps, b.steps, (x, y) => x.key === y.key))))
     && sameItems(left.changes, right.changes, (a, b) => a.path === b.path && a.added === b.added && a.removed === b.removed &&

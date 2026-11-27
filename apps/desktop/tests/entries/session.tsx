@@ -40,7 +40,9 @@ function Entry() {
   const send = agent.transport.send.bind(agent.transport);
   agent.transport.send = (line) => {
     const frame = JSON.parse(line);
-    if (frame.method === "session/set_config_option" && frame.params.sessionId === "s2" && frame.params.configId === "file_approval") {
+    if (frame.method === "_clawcode/session/default_config") {
+      agent.respond(frame.id, configOptions);
+    } else if (frame.method === "session/set_config_option" && frame.params.sessionId === "s2" && frame.params.configId === "file_approval") {
       agent.respond(frame.id, { configOptions: configOptions.map((option) => option.configId === "file_approval"
         ? { ...option, currentValue: frame.params.value } : option) });
     } else send(line);

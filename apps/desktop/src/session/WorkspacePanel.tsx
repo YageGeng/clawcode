@@ -71,9 +71,13 @@ function ChangedFilesList(props: { turns: readonly TurnView[]; onSelect: (change
 /** A session's inspector. Visited tabs stay mounted so browsing files preserves the diff and its scroll position. */
 export function WorkspacePanel(props: {
   host: HostStore; cwd?: string; panel: SessionPanel; compact: boolean; modalOpen?: boolean;
+  /** Host connection state forwarded here in compact mode, while the session header is hidden. */
+  status?: JSX.Element;
   file?: FileChange; turnNumber: number; turns: readonly TurnView[];
   onChange: (panel: SessionPanel) => void; onClose: () => void;
 }) {
+  // A JSX slot is a getter that builds a new element on every read, `If`'s accessor included; read it once.
+  const status = computed(() => props.status);
   // In compact mode the session header disappears. Move keyboard focus to its visible return action.
   let focusBack: ReturnType<typeof setTimeout> | undefined;
   cleanup(() => clearTimeout(focusBack));
@@ -109,6 +113,7 @@ export function WorkspacePanel(props: {
             <Badge label={t("changes.turn", { number: props.turnNumber })} />
           </If>
         </View>
+        <If when={status()}><View class="shrink-0 flex-row items-center">{status()}</View></If>
         <If when={!props.compact}>
           <IconButton icon="x" label={t("files.close")} tooltip={<Tooltip text={t("files.close")} />} onPress={props.onClose} />
         </If>

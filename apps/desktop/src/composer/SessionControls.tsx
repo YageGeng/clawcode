@@ -2,6 +2,7 @@ import { computed, effect, keymap, signal, Text, View } from "nsh";
 import type { ViewRef } from "nsh";
 import type { JSX } from "nsh/jsx-runtime";
 import { t } from "nsh/i18n";
+import type { TranslationKey } from "nsh/i18n";
 
 import type { SessionId } from "../client/acp/protocol";
 import type { SessionConfigSelect } from "../client/acp/sessionConfig";
@@ -27,7 +28,9 @@ const approvalIcons = new Map<string, IconName>([["host", "laptop"], ["ask", "sh
 function choices(option: SessionConfigSelect) {
   return option.options.map(({ value, name }) => ({
     value,
-    title: translatedChoices[option.id]?.includes(value) ? t(`composer.${option.id}.${value}`) : name,
+    // `translatedChoices` lists exactly the values with a key, so the built key names an existing translation.
+    title: translatedChoices[option.id]?.includes(value)
+      ? t(`composer.${option.id}.${value}` as Extract<TranslationKey, `composer.${string}.${string}`>) : name,
   }));
 }
 
@@ -61,10 +64,12 @@ export function SessionControls(props: {
   /** File policy applies to subsequent mutations even when a prompt is still running. */
   const locked = (setting?: string) => props.disabled || props.preparing || saving() || props.host.phase().kind !== "ready"
     || (props.turnBusy && setting !== "file_approval");
-  const summary = () => {
-    const selected = model();
-    return selected?.options.find((item) => item.value === selected.currentValue)?.name ?? selected?.currentValue ?? t("composer.settings");
-  };
+  /** The model's display name, or the generic label when the host offers none. */
+  const modelName = (selected: SessionConfigSelect | undefined) =>
+    selected?.options.find((item) => item.value === selected.currentValue)?.name ?? selected?.currentValue ?? t("composer.settings");
+  const summary = () => modelName(model());
+  // A draft has no Session yet: it names the model a new Session on this host would start with.
+  const draftSummary = () => modelName(props.host.defaultConfig().find((option) => option.id === "model"));
   let modelTrigger: ViewRef | undefined;
 
   /** Ask for a Session only on explicit configuration, then open its real choices above the existing draft. */
@@ -132,8 +137,8 @@ export function SessionControls(props: {
               <Each of={option().options} key={(item) => item.value}>
                 {(item) => {
                   const icon = () => approvalIcons.get(item().value);
-                  return <MenuItem icon={icon()} label={icon() ? t(`fileApproval.${item().value}`) : item().name}
-                    description={icon() ? t(`fileApproval.${item().value}Help`) : undefined}
+                  return <MenuItem icon={icon()} label={icon() ? t(`fileApproval.${item().value}` as Extract<TranslationKey, `fileApproval.${string}`>) : item().name}
+                    description={icon() ? t(`fileApproval.${item().value}Help` as Extract<TranslationKey, `fileApproval.${string}Help`>) : undefined}
                     checked={item().value === option().currentValue} warning={item().value === "allow"} disabled={locked("file_approval")}
                     onSelect={() => void change("file_approval", item().value)} />;
                 }}
@@ -150,8 +155,8 @@ export function SessionControls(props: {
         </If>
         <View class="flex-1" />
         <If when={props.sessionId === null && props.onConfigureNew !== undefined}>
-          <Button label={t("composer.settings")} variant="ghost" size="sm" icon="settings"
-            loading={props.preparing} disabled={locked()} onPress={() => void prepare("model")} />
+          <Button label={draftSummary()} accessibilityLabel={t("composer.settings")} variant="ghost" size="sm"
+            class="max-w-52" trailingIcon="chevron-down" loading={props.preparing} disabled={locked()} onPress={() => void prepare("model")} />
         </If>
         <If when={props.sessionId !== null && (model() || level() || props.onConfigureNew)}>
           <Popover class="w-64 gap-3" open={matches(popup())}

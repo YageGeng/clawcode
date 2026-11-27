@@ -3981,12 +3981,10 @@ dependencies = [
 
 [[package]]
 name = "nsh-core"
-version = "0.7.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "5f06b9c714ef8ceb40fc4dffe421d50855093e24204d9546dd168dad5733f40c"
+version = "0.7.2"
+source = "git+https://github.com/longbridge/nsh?rev=54ca221#54ca221590c001c86d07874f06f7e42954ae39e9"
 dependencies = [
  "cap-std",
- "chrono",
  "crc32fast",
  "httpdate",
  "imagesize",
@@ -4013,9 +4011,8 @@ dependencies = [
 
 [[package]]
 name = "nsh-macros"
-version = "0.7.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "67a6355caf43330daa861432e8970cabf4044d7afe2b50284c47266a1442692e"
+version = "0.7.2"
+source = "git+https://github.com/longbridge/nsh?rev=54ca221#54ca221590c001c86d07874f06f7e42954ae39e9"
 dependencies = [
  "imagesize",
  "proc-macro2",
@@ -7907,3 +7904,123 @@ checksum = "27bc9d5b815bc103f142aa054f561d9187d191692ec7c2d1e2b4737f8dbd7296"
 dependencies = [
  "zune-core",
 ]
+
+[[patch.unused]]
+name = "nsh-base"
+version = "0.7.2"
+source = "git+https://github.com/longbridge/nsh?rev=54ca221#54ca221590c001c86d07874f06f7e42954ae39e9"
+
+[[patch.unused]]
+name = "nsh-dev"
+version = "0.7.2"
+source = "git+https://github.com/longbridge/nsh?rev=54ca221#54ca221590c001c86d07874f06f7e42954ae39e9"
+
+[[patch.unused]]
+name = "nsh-engine"
+version = "0.7.2"
+source = "git+https://github.com/longbridge/nsh?rev=54ca221#54ca221590c001c86d07874f06f7e42954ae39e9"
+
+[[patch.unused]]
+name = "nsh-gpu"
+version = "0.7.2"
+source = "git+https://github.com/longbridge/nsh?rev=54ca221#54ca221590c001c86d07874f06f7e42954ae39e9"
+
+[[patch.unused]]
+name = "nsh-i18n"
+version = "0.7.2"
+source = "git+https://github.com/longbridge/nsh?rev=54ca221#54ca221590c001c86d07874f06f7e42954ae39e9"
+
+[[patch.unused]]
+name = "nsh-ios-app"
+version = "0.7.2"
+source = "git+https://github.com/longbridge/nsh?rev=54ca221#54ca221590c001c86d07874f06f7e42954ae39e9"
+
+[[patch.unused]]
+name = "nsh-ios-host"
+version = "0.7.2"
+source = "git+https://github.com/longbridge/nsh?rev=54ca221#54ca221590c001c86d07874f06f7e42954ae39e9"
+
+[[patch.unused]]
+name = "nsh-js"
+version = "0.7.2"
+source = "git+https://github.com/longbridge/nsh?rev=54ca221#54ca221590c001c86d07874f06f7e42954ae39e9"
+
+[[patch.unused]]
+name = "nsh-linux-app"
+version = "0.7.2"
+source = "git+https://github.com/longbridge/nsh?rev=54ca221#54ca221590c001c86d07874f06f7e42954ae39e9"
+
+[[patch.unused]]
+name = "nsh-linux-host"
+version = "0.7.2"
+source = "git+https://github.com/longbridge/nsh?rev=54ca221#54ca221590c001c86d07874f06f7e42954ae39e9"
+
+[[patch.unused]]
+name = "nsh-macos-app"
+version = "0.7.2"
+source = "git+https://github.com/longbridge/nsh?rev=54ca221#54ca221590c001c86d07874f06f7e42954ae39e9"
+
+[[patch.unused]]
+name = "nsh-macos-host"
+version = "0.7.2"
+source = "git+https://github.com/longbridge/nsh?rev=54ca221#54ca221590c001c86d07874f06f7e42954ae39e9"
+
+[[patch.unused]]
+name = "nsh-package"
+version = "0.7.2"
+source = "git+https://github.com/longbridge/nsh?rev=54ca221#54ca221590c001c86d07874f06f7e42954ae39e9"
+
+[[patch.unused]]
+name = "nsh-platform-android"
+version = "0.7.2"
+source = "git+https://github.com/longbridge/nsh?rev=54ca221#54ca221590c001c86d07874f06f7e42954ae39e9"
+
+[[patch.unused]]
+name = "nsh-platform-apple"
+version = "0.7.2"
+source = "git+https://github.com/longbridge/nsh?rev=54ca221#54ca221590c001c86d07874f06f7e42954ae39e9"
+
+[[patch.unused]]
+name = "nsh-platform-ios"
+version = "0.7.2"
+source = "git+https://github.com/longbridge/nsh?rev=54ca221#54ca221590c001c86d07874f06f7e42954ae39e9"
+
+[[patch.unused]]
+name = "nsh-platform-linux"
+version = "0.7.2"
+source = "git+https://github.com/longbridge/nsh?rev=54ca221#54ca221590c001c86d07874f06f7e42954ae39e9"
+
+[[patch.unused]]
+name = "nsh-platform-macos"
+version = "0.7.2"
+source = "git+https://github.com/longbridge/nsh?rev=54ca221#54ca221590c001c86d07874f06f7e42954ae39e9"
+
+[[patch.unused]]
+name = "nsh-platform-web"
+version = "0.7.2"
+source = "git+https://github.com/longbridge/nsh?rev=54ca221#54ca221590c001c86d07874f06f7e42954ae39e9"
+
+[[patch.unused]]
+name = "nsh-platform-windows"
+version = "0.7.2"
+source = "git+https://github.com/longbridge/nsh?rev=54ca221#54ca221590c001c86d07874f06f7e42954ae39e9"
+
+[[patch.unused]]
+name = "nsh-testing"
+version = "0.7.2"
+source = "git+https://github.com/longbridge/nsh?rev=54ca221#54ca221590c001c86d07874f06f7e42954ae39e9"
+
+[[patch.unused]]
+name = "nsh-updater"
+version = "0.7.2"
+source = "git+https://github.com/longbridge/nsh?rev=54ca221#54ca221590c001c86d07874f06f7e42954ae39e9"
+
+[[patch.unused]]
+name = "nsh-windows-app"
+version = "0.7.2"
+source = "git+https://github.com/longbridge/nsh?rev=54ca221#54ca221590c001c86d07874f06f7e42954ae39e9"
+
+[[patch.unused]]
+name = "nsh-windows-host"
+version = "0.7.2"
+source = "git+https://github.com/longbridge/nsh?rev=54ca221#54ca221590c001c86d07874f06f7e42954ae39e9"

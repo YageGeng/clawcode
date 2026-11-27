@@ -60,3 +60,17 @@ test("appearance_and_language_ignore_legacy_sharing_values", async () => {
     expect(store.settings()).toEqual({ ...DEFAULT_SETTINGS, appearance: "dark", language: "en" });
   }
 });
+
+test("settings drop an invalid openIn", async () => {
+  /** The `openIn` read back after saving `value`. */
+  const reload = async (value: unknown) => {
+    await Storage.setItem("settings", JSON.stringify({ openIn: value }));
+    const store = createSettingsStore();
+    await store.load();
+    return store.settings().openIn;
+  };
+  expect(DEFAULT_SETTINGS.openIn).toBe("file-manager");
+  expect(await reload("../x")).toBe("file-manager");
+  expect(await reload(123)).toBe("file-manager");
+  expect(await reload("zed")).toBe("zed");
+});

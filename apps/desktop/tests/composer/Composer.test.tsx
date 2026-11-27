@@ -67,7 +67,8 @@ test("a_lost_backend_keeps_the_session_and_returns_the_text", async () => {
   const app = await openEntry();
   await send(app, "Crashes", "hello");
   // The Session stays readable under the reason, the sidebar keeps its rows, and what was sent is back in the field.
-  await app.waitFor("text:Backend stopped: crashed");
+  // An open Session shows the lost backend as an offline status in its header; the reason is its tooltip.
+  await app.waitFor("text:Offline");
   await app.waitFor("text:hello");
   await app.waitFor("text:Echo");
   await app.waitUntil(() => app.value("label:Message") === "hello");
@@ -159,7 +160,8 @@ test("session_settings_keep_the_last_confirmed_choice_after_failure", async () =
 test("offline_session_settings_show_cached_values_and_disable_changes", async () => {
   const app = await openEntry();
   await send(app, "Crashes", "disconnect");
-  await app.waitFor("text:Backend stopped: crashed");
+  // An open Session shows the lost backend as an offline status in its header; the reason is its tooltip.
+  await app.waitFor("text:Offline");
   expect(app.enabled("label:Session mode")).toBe(false);
   await app.press("label:Session settings");
   await app.waitFor("label:Thinking level: Low");
@@ -240,4 +242,11 @@ test("an_overflowing_native_picker_selection_keeps_only_the_previous_attachments
   await app.waitFor("text:Attach up to 5 images per message.");
   await app.waitFor("label:pixel.png");
   expect(app.shows("label:extra-0.png")).toBe(false);
+});
+
+test("a_new_draft_names_the_hosts_default_model", async () => {
+  const app = await openEntry();
+  await app.waitFor("label:Session settings");
+  expect(app.shows("text:Model A")).toBe(true);
+  expect(app.shows("text:Session settings")).toBe(false);
 });

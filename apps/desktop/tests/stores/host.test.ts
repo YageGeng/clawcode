@@ -1,6 +1,6 @@
 import { expect, test } from "nsh/test";
 
-import type { SessionInfo } from "../../src/client/acp/protocol";
+import type { SessionId, SessionInfo } from "../../src/client/acp/protocol";
 import { acpPeer, MemoryTransport } from "../support/memoryTransport";
 import { createHostStore, LOCAL_HOST } from "../../src/stores/host";
 
@@ -53,4 +53,75 @@ test("diff_selections_are_scoped_to_host_and_session_and_survive_a_reconnect", a
   expect(reconnected.panels().get(id)).toEqual(selection);
   reconnected.setPanel(id);
   expect(reconnected.panels().has(id)).toBe(false);
+});
+
+test("queryRunning reads runtime without attaching the session", async () => {
+  const peer = acpPeer(sessions);
+  const host = createHostStore(LOCAL_HOST, new MemoryTransport((frame, transport) => {
+    const request = JSON.parse(frame) as { id?: number; method?: string; params?: { sessionId?: string } };
+    if (request.method === "_clawcode/session/runtime") {
+      transport.deliver(JSON.stringify({ jsonrpc: "2.0", id: request.id, result: { running: request.params?.sessionId === "s2" } }));
+      return;
+    }
+    peer(frame, transport);
+  }));
+  await host.start();
+  expect(await host.queryRunning("s2" as SessionId)).toBe(true);
+  expect(await host.queryRunning("s1" as SessionId)).toBe(false);
+  expect(host.session("s2" as SessionId)).toBe(undefined);
+});
+
+test("host_reads_the_default_session_settings_for_new_drafts", async () => {
+  const peer = acpPeer(sessions);
+  const host = createHostStore(LOCAL_HOST, new MemoryTransport((frame, transport) => {
+    const request = JSON.parse(frame) as { id?: number; method?: string };
+    if (request.method === "_clawcode/session/default_config") {
+      transport.deliver(JSON.stringify({ jsonrpc: "2.0", id: request.id, result: [
+        { configId: "model", type: "select", name: "Model", currentValue: "p/flash",
+          options: [{ value: "p/flash", name: "DeepSeek V4 Flash" }] },
+      ] }));
+      return;
+    }
+    peer(frame, transport);
+  }));
+  await host.start();
+  await new Promise((resolve) => setTimeout(resolve, 0));
+  expect(host.defaultConfig().find((option) => option.id === "model")?.currentValue).toBe("p/flash");
+});
+
+/** A host whose peer also answers `session/set_title` and `session/delete`, recording the requests it saw. */
+async function managedHost() {
+  const seen: Array<{ method: string; params: Record<string, unknown> }> = [];
+  let listed = [...sessions];
+  const host = createHostStore(LOCAL_HOST, new MemoryTransport((frame, transport) => {
+    const request = JSON.parse(frame) as { id?: number; method?: string; params?: Record<string, unknown> };
+    const reply = (result: unknown) => transport.deliver(JSON.stringify({ jsonrpc: "2.0", id: request.id, result }));
+    if (request.method === "session/set_title") {
+      seen.push({ method: request.method, params: request.params ?? {} });
+      return reply({ title: request.params?.title });
+    }
+    if (request.method === "session/delete") {
+      seen.push({ method: request.method, params: request.params ?? {} });
+      listed = listed.filter((session) => session.sessionId !== request.params?.sessionId);
+      return reply({});
+    }
+    if (request.method === "session/list") return reply({ sessions: listed });
+    acpPeer(listed)(frame, transport);
+  }));
+  await host.start();
+  return { host, seen };
+}
+
+test("renaming_a_session_retitles_it_on_the_host_and_in_the_list", async () => {
+  const { host, seen } = await managedHost();
+  await host.renameSession("s1" as SessionId, "  Parser work  ");
+  expect(seen).toEqual([{ method: "session/set_title", params: { sessionId: "s1", title: "Parser work" } }]);
+  expect(host.sessions().find((session) => session.sessionId === "s1")?.title).toBe("Parser work");
+});
+
+test("deleting_a_session_removes_it_from_the_list", async () => {
+  const { host, seen } = await managedHost();
+  await host.deleteSession("s2" as SessionId);
+  expect(seen).toEqual([{ method: "session/delete", params: { sessionId: "s2" } }]);
+  expect(host.sessions().map((session) => session.sessionId)).toEqual(["s1"]);
 });

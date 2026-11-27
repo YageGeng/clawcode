@@ -1,4 +1,4 @@
-import type { PermissionPrompt, SessionSummary } from "../domain/model";
+import type { PermissionPrompt, SessionOwner, SessionSummary } from "../domain/model";
 
 export type Brand<T, Name extends string> = T & { readonly __brand: Name };
 
@@ -75,6 +75,8 @@ export const AcpProtocol = {
     sessionPrompt: "session/prompt",
     sessionCancel: "session/cancel",
     sessionSetConfigOption: "session/set_config_option",
+    sessionSetTitle: "session/set_title",
+    sessionDelete: "session/delete",
     sessionUpdate: "session/update"
   },
   /** `value` as a plain JSON object, or `undefined` for anything else (arrays and null included). */
@@ -183,7 +185,16 @@ export const AcpProtocol = {
       title: session.title?.trim() || session.sessionId,
       ...(typeof details.createdAtMs === "string" ? { createdAtMs: details.createdAtMs as TimestampMs } : {}),
       ...(typeof details.modifiedAtMs === "string" ? { modifiedAtMs: details.modifiedAtMs as TimestampMs } : {}),
+      ...(typeof details.parentSessionId === "string" ? { parentSessionId: details.parentSessionId as SessionId } : {}),
+      ...this.sessionOwner(details.ownership),
     };
+  },
+  /** The `owner` field of a summary; older hosts and incomplete edges contribute nothing. */
+  sessionOwner(value: unknown): { owner?: SessionOwner } {
+    const { sessionId, name, nickname } = this.record(value) ?? {};
+    return typeof sessionId === "string" && typeof name === "string" && typeof nickname === "string"
+      ? { owner: { sessionId: sessionId as SessionId, name, nickname } }
+      : {};
   },
   /** The prompt a `session/request_permission` asks, without its queue key; `undefined` when it names no Session, title or valid option. */
   permissionRequest(params: unknown): Omit<PermissionPrompt, "key"> | undefined {

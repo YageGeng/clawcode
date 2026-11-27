@@ -1,13 +1,14 @@
 //! The desktop app's Rust side: what `App.tsx` imports from `clawcode-backend`.
 //! Their TypeScript declarations are generated from these types into `.nsh/types`.
 
+mod apps;
 mod connection;
 mod diff;
+mod editors;
 mod fonts;
 mod hosting;
 mod runtime;
 mod thread;
-mod title_bar;
 
 use std::time::Duration;
 
@@ -30,8 +31,8 @@ fn native(registry: &mut Registry) {
         .class::<RemoteConnection>()
         .class::<RemotePairing>()
         .module::<diff::SnapshotDiff>()
+        .module::<editors::ExternalEditors>()
         .module::<Folders>()
-        .module::<title_bar::WindowControls>()
         .module::<fonts::DesktopFonts>();
 }
 

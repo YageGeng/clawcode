@@ -202,3 +202,9 @@ test("a_streamed_thought_keeps_the_grouping_index_without_visiting_any_message",
   expect(groups.update({ ...streamed, messages: new CountedMessages(streamed.messages) }) === before).toBe(true);
   expect(lookups).toBe(0);
 });
+
+test("running_turn_exposes_its_start_for_a_live_duration", () => {
+  const turns = groupTurns(session([message("u1", "user", "go", 1000), tool("t1", "execute")], true));
+  expect(turns[0]?.startedAtMs).toBe(1000);
+  expect(turns[0]?.durationMs).toBe(undefined);
+});

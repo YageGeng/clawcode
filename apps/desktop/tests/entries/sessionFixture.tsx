@@ -5,19 +5,24 @@ import type { SessionId } from "../../src/client/acp/protocol";
 import { Shell } from "../../src/shell/Shell";
 import { createAppStore } from "../../src/stores/app";
 import { createHostStore, LOCAL_HOST } from "../../src/stores/host";
+import type { HostInfo } from "../../src/stores/host";
 import { createSettingsStore } from "../../src/stores/settings";
 import { ScriptedAgent } from "../support/scriptedAgent";
+import type { ScriptedSession } from "../support/scriptedAgent";
 
-/** Mounts the shell; `setup` scripts the agent before start, `opened` runs once "s1" is open. */
-export function mountSession(setup: (agent: ScriptedAgent) => void, opened?: (agent: ScriptedAgent) => void): void {
+/** Mounts the shell; `setup` scripts the agent before start, `opened` runs once "s1" is open; `others` are listed after "s1" on `host`. */
+export function mountSession(
+  setup: (agent: ScriptedAgent) => void, opened?: (agent: ScriptedAgent) => void,
+  others: readonly ScriptedSession[] = [], host: HostInfo = LOCAL_HOST,
+): void {
   mount(() => {
-    const agent = new ScriptedAgent([{ sessionId: "s1", cwd: "/work/alpha", title: "Fix the build" }]);
+    const agent = new ScriptedAgent([{ sessionId: "s1", cwd: "/work/alpha", title: "Fix the build" }, ...others]);
     setup(agent);
-    const store = createAppStore([createHostStore(LOCAL_HOST, agent.transport)]);
+    const store = createAppStore([createHostStore(host, agent.transport)]);
     // JSX props are getters; the open session must retain its settings across menu changes.
     const settings = createSettingsStore();
     void store.start().then(async () => {
-      store.openSession(LOCAL_HOST.id, "s1" as SessionId);
+      store.openSession(host.id, "s1" as SessionId);
       opened?.(agent);
     });
     return <Shell store={store} settings={settings} />;

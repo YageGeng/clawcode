@@ -25,28 +25,54 @@ export function ListItem(props: {
   disabled?: boolean;
   trailing?: JSX.Element;
   actions?: JSX.Element;
+  /** Keeps hover-revealed `actions` visible while a menu owned by this row is open. */
+  actionsVisible?: boolean;
   onPress?: () => void;
 }) {
+  // Multi-line rows anchor their leading icon to the 20pt title line and use generous vertical padding;
+  // single-line rows use 4pt vertical padding so a 24pt `sm` action button keeps the row at the 32pt grid.
+  const multiline = () => props.description !== undefined;
+  // When a row has both a resting status indicator and hover-revealed actions, overlay the actions on the
+  // trailing slot so the resting indicator sits flush at the row's right spine and labels keep full width.
+  const overlayActions = "actions" in props && "trailing" in props;
+  const actionsShown = () => props.actionsVisible === true;
   return (
     <BaseButton
       accessibilityLabel={props.accessibilityLabel}
       selected={props.selected === true}
       disabled={props.disabled === true}
       onPress={props.onPress}
-      class={`group min-h-8 flex-row items-center gap-2 rounded-(--radius) px-2.5 py-1.5 hover:bg-accent selected:bg-sidebar-accent disabled:opacity-50 ${focusRing} ${motionClass.wash}`}
+      class={`group relative min-h-8 flex-row gap-2 rounded-(--radius) px-2.5 ${multiline() ? "items-start py-1.5" : "items-center py-1"} hover:bg-accent active:bg-sidebar-accent/80 selected:bg-sidebar-accent disabled:opacity-50 ${focusRing} ${motionClass.wash}`}
     >
-      {props.leading ?? <If when={props.icon}>{(icon) => <Icon name={icon()} size="md" color="muted-foreground" />}</If>}
-      <View class="min-w-0 flex-1">
+      <If
+        when={"leading" in props}
+        else={
+          <If when={props.icon}>
+            {(icon) => (
+              <View class={multiline() ? "h-5 shrink-0 items-center justify-center" : "shrink-0"}>
+                <Icon name={icon()} size="md" color="muted-foreground" />
+              </View>
+            )}
+          </If>
+        }
+      >
+        <View class={multiline() ? "h-5 shrink-0 items-center justify-center" : "shrink-0"}>{props.leading}</View>
+      </If>
+      <View class={`min-w-0 flex-1 ${multiline() ? "gap-0.5" : ""} ${overlayActions ? (actionsShown() ? "pr-6" : "group-hover:pr-6 group-focus-within:pr-6") : ""}`}>
         <If when={props.mono === true} else={
-          <Text class={`${props.description === undefined ? inlineLabel : ""} ${type.ui} text-foreground group-selected:font-medium truncate`}>{props.label}</Text>
+          <Text class={`${multiline() ? "" : inlineLabel} ${type.ui} text-foreground group-selected:font-medium truncate`}>{props.label}</Text>
         }>
-          <FilePath path={props.label} class={`${props.description === undefined ? inlineLabel : ""} font-mono ${type.meta} text-foreground group-selected:font-medium`} />
+          <FilePath path={props.label} class={`${multiline() ? "" : inlineLabel} font-mono ${type.meta} text-foreground group-selected:font-medium`} />
         </If>
         <If when={props.description}>{(text) => <Text class={`${type.meta} text-muted-foreground truncate`}>{text()}</Text>}</If>
       </View>
-      {props.trailing}
-      <If when={props.actions !== undefined}>
-        <View class={`flex-row gap-0.5 opacity-0 group-hover:opacity-100 group-focus-within:opacity-100 transition-opacity duration-120 ease-out motion-reduce:transition-none`}>
+      <If when={overlayActions} else={props.trailing}>
+        <View class={`shrink-0 flex-row items-center ${actionsShown() ? "opacity-0" : "group-hover:opacity-0 group-focus-within:opacity-0"} transition-opacity duration-120 ease-out motion-reduce:transition-none`}>
+          {props.trailing}
+        </View>
+      </If>
+      <If when={"actions" in props}>
+        <View class={`${overlayActions ? "absolute inset-y-0 right-1.5 items-center" : ""} flex-row gap-0.5 ${actionsShown() ? "opacity-100" : "opacity-0 group-hover:opacity-100 group-focus-within:opacity-100"} transition-opacity duration-120 ease-out motion-reduce:transition-none`}>
           {props.actions}
         </View>
       </If>

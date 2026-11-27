@@ -1,6 +1,7 @@
 import { RemoteConnection, RemoteHosting } from "clawcode-backend";
 import { signal } from "nsh";
 import { t } from "nsh/i18n";
+import type { TranslationKey } from "nsh/i18n";
 import process from "process";
 
 import { messageOf } from "../client/errors";
@@ -36,7 +37,8 @@ export function remoteError(error: unknown): string {
   const message = messageOf(error);
   if (/incompatible|version mismatch|application protocol|unsupported version/i.test(message)) return t("remote.incompatible");
   const key = remoteFailures[message];
-  return key ? t(`remote.error.${key}`) : message;
+  // `remoteFailures` maps only to keys under `remote.error`.
+  return key ? t(`remote.error.${key}` as Extract<TranslationKey, `remote.error.${string}`>) : message;
 }
 
 /** Installation-wide identity and incoming requests, independent of the selected host and its ACP state. */

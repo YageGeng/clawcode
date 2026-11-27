@@ -45,6 +45,17 @@ shell:
   newSession: New session
   workspaces: Workspaces
   recent: Recent
+  pinned: Pinned
+  rename: Rename
+  renameField: Session title
+  renameFailed: Couldn't rename the session
+  pin: Pin
+  unpin: Unpin
+  delete: Delete
+  deleteTitle: "Delete \"%{title}\"?"
+  deleteDetail: Its conversation history is deleted on the host.
+  deleteFailed: Couldn't delete the session
+  sessionActions: "Actions for %{title}"
   settings: Settings
   back: Back
   forward: Forward
@@ -72,6 +83,7 @@ turn:
   changedFiles: "%{count} files changed"
   workedFor: Worked for %{duration}
   working: Working
+  workingFor: "Working for %{duration}"
 time:
   seconds: "%{s}s"
   minutesSeconds: "%{m}m %{s}s"
@@ -88,6 +100,22 @@ changes:
   next: Next edit
   backToList: All changed files
   edited: Edited %{file}
+details:
+  title: Session details
+  openFileManager: Open in file manager
+  fileManager: File manager
+  openIn: "Open in %{target}"
+  chooseEditor: Choose an editor
+  openFailed: "Couldn't open the workspace: %{detail}"
+  related: Related sessions
+  relatedRunning: "Related sessions · %{count} running"
+  forkedFrom: Forked from
+  parentAgent: Parent agent
+  runningRow: "%{name}, running"
+  justNow: just now
+  minutes: "%{n} min"
+  hours: "%{n} h"
+  days: "%{n} d"
 files:
   hide: Hide workspace panel
   title: Files

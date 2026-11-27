@@ -6,13 +6,14 @@ import type { Tone } from "./tokens";
 import { inlineLabel, toneFill, toneSoft, type } from "./tokens";
 import { motionClass } from "./motion";
 
-/** Each surface's look: a content card, or the floating composer card (spec §5.1). */
+/** Each surface's look: a content card, a compact floating panel (details card), or the floating composer card (spec §5.1). */
 const surfaceVariant = {
   card: "rounded-(--radius-lg) border border-border bg-card p-4 gap-3 shadow-xs",
+  panel: "rounded-(--radius-lg) border border-border bg-card p-1.5 shadow-sm",
   floating: "rounded-(--radius-xl) border border-input bg-card px-3.5 pt-3 pb-2.5 gap-2 shadow-md",
 } as const;
 
-/** A container for a group of content: a `card` (default) or the `floating` composer card. */
+/** A container for a group of content: a `card` (default), a compact floating `panel`, or the `floating` composer card. */
 export function Surface(props: { children: JSX.Element; variant?: keyof typeof surfaceVariant; class?: string }) {
   return <View class={`${surfaceVariant[props.variant ?? "card"]} ${props.class ?? ""}`}>{props.children}</View>;
 }
@@ -26,9 +27,17 @@ export function Badge(props: { label: string; tone?: Tone }) {
   );
 }
 
-/** A divider between groups; vertical inside a row. */
-export function Separator(props: { vertical?: boolean }) {
-  return <View class={props.vertical === true ? "w-px self-stretch bg-border" : "h-px self-stretch bg-border"} />;
+/** A divider between groups; vertical inside a row, or `inset` horizontally inside compact padded surfaces. */
+export function Separator(props: { vertical?: boolean; inset?: boolean }) {
+  return (
+    <View
+      class={
+        props.vertical === true
+          ? "w-px self-stretch bg-border"
+          : `h-px self-stretch bg-border ${props.inset === true ? "mx-1" : ""}`
+      }
+    />
+  );
 }
 
 /**

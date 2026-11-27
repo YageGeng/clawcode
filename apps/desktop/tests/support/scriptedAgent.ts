@@ -7,7 +7,8 @@ import { MemoryTransport } from "./memoryTransport";
 export type UpdateParams = Readonly<{ sessionId: string; update: Record<string, unknown> }>;
 
 /** A listed Session. */
-export type ScriptedSession = Readonly<{ sessionId: string; cwd: string; title?: string; modifiedAtMs?: string }>;
+/** A listed Session; `meta` adds product metadata such as `parentSessionId` or `ownership`. */
+export type ScriptedSession = Readonly<{ sessionId: string; cwd: string; title?: string; modifiedAtMs?: string; meta?: Record<string, unknown> }>;
 
 /** One frame the agent received: a request (with `id`) or a notification. */
 export type Received = Readonly<{ method: string; params: Record<string, unknown>; id?: number | string }>;
@@ -144,7 +145,9 @@ export class ScriptedAgent {
             sessionId: session.sessionId,
             cwd: session.cwd,
             title: session.title ?? null,
-            ...(session.modifiedAtMs === undefined ? {} : { _meta: { clawcode: { modifiedAtMs: session.modifiedAtMs } } }),
+            ...(session.modifiedAtMs === undefined && session.meta === undefined ? {} : {
+              _meta: { clawcode: { ...session.meta, ...(session.modifiedAtMs === undefined ? {} : { modifiedAtMs: session.modifiedAtMs }) } },
+            }),
           })),
         });
       case "session/new": {
@@ -155,6 +158,16 @@ export class ScriptedAgent {
       case "session/resume":
         for (const update of this.replays.get(String(params.sessionId)) ?? []) this.push(update);
         return this.respond(id, null);
+      case "session/set_title": {
+        const index = this.sessions.findIndex((session) => session.sessionId === params.sessionId);
+        if (index >= 0) this.sessions[index] = { ...this.sessions[index]!, title: String(params.title) };
+        return this.respond(id, { title: params.title });
+      }
+      case "session/delete": {
+        const index = this.sessions.findIndex((session) => session.sessionId === params.sessionId);
+        if (index >= 0) this.sessions.splice(index, 1);
+        return this.respond(id, {});
+      }
       case "_clawcode/session/runtime":
         return this.respond(id, { running: this.running.has(String(params.sessionId)) });
       case "_clawcode/session/pending_messages":

@@ -9,6 +9,8 @@ import { focusRing, inlineLabel, type } from "./tokens";
 /** A grey one-line toggle ("Worked for 3m ›", "Ran commands ›") with its content below while open; the caller owns `open`. */
 export function Disclosure(props: {
   label: string;
+  /** What screen readers say when it differs from `label` (a ticking duration is not re-announced every second). */
+  accessibilityLabel?: string;
   accessibilityHint?: string;
   icon?: IconName;
   open: boolean;
@@ -30,12 +32,12 @@ export function Disclosure(props: {
       focusable
       onPress={props.onToggle}
       accessibilityState={{ expanded: props.open }}
-      accessibilityLabel={props.label}
+      accessibilityLabel={props.accessibilityLabel ?? props.label}
       accessibilityHint={props.accessibilityHint}
-      class={`group flex-row items-center gap-1.5 rounded-(--radius) px-2 py-1 ${summary ? "min-w-0 flex-1 self-stretch" : "self-start"} ${props.flush ? "-ml-2" : ""} hover:bg-accent ${focusRing} ${motionClass.wash}`}
+      class={`group flex-row items-center gap-1.5 rounded-(--radius) px-2 py-1 ${summary ? "min-w-0 flex-1 self-stretch" : "self-start"} ${props.flush ? "-ml-2" : ""} hover:bg-accent active:bg-sidebar-accent/80 ${focusRing} ${motionClass.wash}`}
     >
       <If when={props.icon}>{(icon) => <Icon name={icon()} size="sm" color="muted-foreground" />}</If>
-      <Text class={`${inlineLabel} ${type.ui} ${summary ? "shrink truncate text-foreground" : "text-muted-foreground group-hover:text-foreground"}`}>{props.label}</Text>
+      <Text class={`tabular-nums ${inlineLabel} ${type.ui} ${summary ? "shrink truncate text-foreground" : "text-muted-foreground group-hover:text-foreground"}`}>{props.label}</Text>
       {props.trailing}
       <View class={`shrink-0 ${props.open ? "rotate-90" : ""} ${motionClass.turn}`}>
         <Icon name="chevron-right" size="sm" color="muted-foreground" />

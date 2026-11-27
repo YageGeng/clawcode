@@ -15,7 +15,10 @@ CLAW_CONFIG=$PWD/tests/fixture/config.toml nsh test   # cargo test, then *.test.
 nsh run      # opens the app with hot reload
 ```
 
-Use the `nsh` CLI version 0.7.1 to match `nsh-core` in the root `Cargo.toml`.
+Use the nightly `nsh` CLI (`nsh update nightly`). The root `Cargo.toml` keeps the crates.io release; the repository's
+`.cargo/config.toml` patches every nsh crate to the GitHub commit that CLI was built from (`nsh --version` shows it), and
+NSH builds this app's hosts from the same checkout. After `nsh update nightly`, set the `rev`s there to the new commit.
+Delete that file to go back to the release (then use the stable CLI of the same version).
 The supported Linux session is Wayland. Use `GDK_BACKEND=wayland nsh run` to launch the GTK app
 and the same environment variable with `nsh test --target linux` for native UI checks.
 

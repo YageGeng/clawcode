@@ -13,7 +13,7 @@ import type { TurnSource } from "./TurnRow";
 /** Each call gets its own ACP kind's icon, including adjacent calls of different kinds. */
 const icons: Readonly<Record<ToolKind, IconName>> = {
   execute: "terminal", read: "file-text", edit: "pencil", delete: "x", move: "arrow-right",
-  search: "search", fetch: "arrow-down", think: "ellipsis", switch_mode: "settings", other: "settings",
+  search: "search", fetch: "arrow-down", think: "brain", switch_mode: "settings", other: "settings",
 };
 
 /** Picks one identifying argument for the summary; full multiline commands and paths stay in the input. */
@@ -36,7 +36,7 @@ export function ToolRow(props: { id: ToolCallId; source: TurnSource }) {
   return (
     <If when={tool()}>
       {(call) => (
-        <Disclosure label={call().name || call().title || props.id} icon={icons[call().kind ?? "other"]}
+        <Disclosure flush label={call().name || call().title || props.id} icon={icons[call().kind ?? "other"]}
           open={props.source.isOpen(openKey())} onToggle={() => props.source.toggle(openKey())}
           trailing={
             <View class="min-w-0 shrink flex-row items-center gap-2">

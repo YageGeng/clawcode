@@ -41,7 +41,7 @@ export function Menu(props: {
 }
 
 /** The row every menu item and submenu trigger shares. */
-const itemRow = `min-h-8 flex-row gap-2.5 rounded-(--radius) px-2.5 py-1.5 focus:bg-accent hover:bg-accent disabled:opacity-50 ${motionClass.wash}`;
+const itemRow = `min-h-8 flex-row gap-2.5 rounded-(--radius) px-2.5 py-1.5 focus:bg-accent hover:bg-accent active:bg-sidebar-accent/80 disabled:opacity-50 ${motionClass.wash}`;
 
 /**
  * One command of a `Menu`. `danger` for destructive commands (red), `warning` for risky but non-destructive
@@ -51,6 +51,7 @@ export function MenuItem(props: {
   label: string;
   description?: string;
   icon?: IconName;
+  leading?: JSX.Element;
   danger?: boolean;
   warning?: boolean;
   disabled?: boolean;
@@ -69,12 +70,19 @@ export function MenuItem(props: {
   return (
     <BaseMenuItem disabled={props.disabled === true} checked={props.checked} onSelect={props.onSelect}
       class={`${itemRow} ${multiline() ? "items-start" : "items-center"}`}>
-      <If when={props.icon}>
-        {(icon) => (
-          <View class={multiline() ? "h-5 shrink-0 items-center justify-center" : "shrink-0"}>
-            <Icon name={icon()} size="md" color={tone().icon} />
-          </View>
-        )}
+      <If
+        when={"leading" in props}
+        else={
+          <If when={props.icon}>
+            {(icon) => (
+              <View class={multiline() ? "h-5 shrink-0 items-center justify-center" : "shrink-0"}>
+                <Icon name={icon()} size="md" color={tone().icon} />
+              </View>
+            )}
+          </If>
+        }
+      >
+        <View class={multiline() ? "h-5 shrink-0 items-center justify-center" : "shrink-0"}>{props.leading}</View>
       </If>
       <View class="flex-1 gap-0.5">
         <Text class={`${inlineLabel} ${type.ui} ${tone().text}`}>{props.label}</Text>
@@ -118,6 +126,8 @@ export function Submenu(props: { label: string; icon?: IconName; children: JSX.E
 /** Content anchored to its trigger: same instant popup surface as a menu. */
 export function Popover(props: {
   trigger: JSX.Element;
+  /** Distance from the trigger; a header button's popover clears the header's bottom edge with a larger one. */
+  offset?: number;
   children: JSX.Element;
   class?: string;
   open?: boolean;
@@ -130,7 +140,7 @@ export function Popover(props: {
       open={props.open}
       onOpenChange={(event) => props.onOpenChange?.(event.open)}
       onOpen={props.onOpen}
-      offset={6}
+      offset={props.offset ?? 6}
       margin={8}
       popupClass={`${popupSurface} p-3 ${props.class ?? ""}`}
     >

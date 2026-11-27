@@ -35,7 +35,7 @@ type TextControlProps = {
 };
 
 /** A one-line text field. */
-export function Input(props: TextControlProps & { size?: ControlSize; onSubmit?: () => void }) {
+export function Input(props: TextControlProps & { size?: ControlSize; onSubmit?: () => void; autoFocus?: boolean; selectTextOnFocus?: boolean }) {
   return (
     <BaseInput
       value={props.value}
@@ -44,6 +44,9 @@ export function Input(props: TextControlProps & { size?: ControlSize; onSubmit?:
       accessibilityLabel={props.accessibilityLabel}
       onChange={(event) => props.onChange(event.value)}
       onSubmit={() => props.onSubmit?.()}
+      onBlur={() => props.onBlur?.()}
+      autoFocus={props.autoFocus === true}
+      selectTextOnFocus={props.selectTextOnFocus === true}
       class={`${frame(props.invalid === true)} ${sizing[props.size ?? "md"]} ${props.class ?? ""}`}
     />
   );

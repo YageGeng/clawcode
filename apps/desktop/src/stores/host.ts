@@ -77,12 +77,16 @@ export type HostStore = Readonly<{
   commandsFor: (sessionId: SessionId) => readonly AvailableCommand[];
   /** The settings that this host last confirmed for one Session. */
   sessionConfig: (sessionId: SessionId) => readonly SessionConfigSelect[];
+  /** The settings a new Session on this host starts with, for a draft that has no Session yet. */
+  defaultConfig: Accessor<readonly SessionConfigSelect[]>;
   /** Whether a settings write is awaiting a response for this Session. */
   configPending: (sessionId: SessionId) => boolean;
   /** Applies one advertised choice and rejects if the host could not confirm the change. */
   setSessionConfig: (sessionId: SessionId, configId: string, value: string) => Promise<void>;
   /** Whether a Session is running a turn. */
   running: (sessionId: SessionId) => boolean;
+  /** Asks the host whether a Session runs, without attaching it; for Sessions this connection never opened. */
+  queryRunning: (sessionId: SessionId) => Promise<boolean>;
   /** The oldest approval a Session is waiting for. */
   permissionFor: (sessionId: SessionId) => PermissionPrompt | undefined;
   /** Asks still accepting an answer, excluding replies already in the host's queue. */
@@ -104,6 +108,10 @@ export type HostStore = Readonly<{
   stop: () => void;
   /** Shows a Session: replays its transcript unless it is running and already attached. */
   openSession: (sessionId: SessionId) => Promise<void>;
+  /** Retitles a Session on the host; the list shows the host's trimmed title once it confirms. */
+  renameSession: (sessionId: SessionId, title: string) => Promise<void>;
+  /** Deletes a Session on the host, then lists the Sessions again. */
+  deleteSession: (sessionId: SessionId) => Promise<void>;
   /** Creates a Session in `cwd`, refreshes the list and opens it; its id. */
   newSession: (cwd: string) => Promise<SessionId>;
   /** Sends text and selected images; a failed turn returns the complete draft and adds a notice. */
@@ -232,6 +240,16 @@ export function createHostStore(
   };
 
   /** Re-lists the Sessions. */
+  const defaultConfig = signal<readonly SessionConfigSelect[]>(EMPTY_CONFIG);
+  /** Reads what a new Session starts with; a host without the method keeps the generic draft label. */
+  const readDefaultConfig = async () => {
+    try {
+      const reply = await connection.request<unknown>(`_${NAMESPACE}/session/default_config`, {}, { timeoutMs });
+      defaultConfig.set(decodeSessionConfig(reply) ?? EMPTY_CONFIG);
+    } catch (error) {
+      console.warn(`default session settings on host ${info.id.slice(0, 12)}: ${messageOf(error)}`);
+    }
+  };
   const refreshSessions = async () => {
     const listed = await connection.request<SessionListResult>(AcpProtocol.methods.sessionList, {}, { timeoutMs });
     dispatch({ type: "session/listed", sessions: listed.sessions.map((session) => AcpProtocol.sessionSummary(session, NAMESPACE)) });
@@ -314,6 +332,7 @@ export function createHostStore(
         { timeoutMs },
       );
       await refreshSessions();
+      void readDefaultConfig();
       // A close can follow the directory response on the wire before this continuation runs.
       if (phase().kind === "offline" || phase().kind === "failed") return;
       offlineSessions.set(undefined);
@@ -498,6 +517,24 @@ export function createHostStore(
     }),
     sessions,
     session: (sessionId) => sessionWorkspaces().get(sessionId),
+    defaultConfig,
+    renameSession: async (sessionId, title) => {
+      const reply = AcpProtocol.record(await connection.request<unknown>(
+        AcpProtocol.methods.sessionSetTitle, { sessionId, title: title.trim() }, { timeoutMs }));
+      // The host trims and bounds titles itself; show what it stored.
+      const stored = typeof reply?.title === "string" ? reply.title : title.trim();
+      dispatch({ type: "session/title", sessionId, title: stored || sessionId });
+    },
+    deleteSession: async (sessionId) => {
+      await connection.request<unknown>(AcpProtocol.methods.sessionDelete, { sessionId }, { timeoutMs });
+      panels.update((current) => {
+        if (!current.has(sessionId)) return current;
+        const next = new Map(current);
+        next.delete(sessionId);
+        return next;
+      });
+      await refreshSessions();
+    },
     commandsFor: (sessionId) => sessionCommands().get(sessionId) ?? EMPTY_COMMANDS,
     sessionConfig: (sessionId) => sessionConfigs().get(sessionId) ?? EMPTY_CONFIG,
     configPending: (sessionId) => configWrites().has(sessionId),
@@ -528,6 +565,14 @@ export function createHostStore(
       }
     },
     running: (sessionId) => runningIds().has(sessionId),
+    queryRunning: async (sessionId) => {
+      const result = AcpProtocol.record(await connection.request<unknown>(SESSION_RUNTIME, { sessionId }, { timeoutMs }));
+      // Same validation as `readRuntime`: a reply about another Session is not an answer.
+      if (typeof result?.running !== "boolean" || (result.sessionId !== undefined && result.sessionId !== sessionId)) {
+        throw new Error("Invalid session runtime snapshot");
+      }
+      return result.running;
+    },
     permissionFor: (sessionId) => permissions().find((prompt) => prompt.sessionId === sessionId),
     openQuestions: (sessionId) => openQuestions(sessionWorkspaces().get(sessionId)?.interactions ?? initialInteractions),
     awaitsAnswer: (sessionId) => awaitingAnswers().has(sessionId),

@@ -64,10 +64,13 @@ menu, never hover-only.
 
 ## Shell layout (N1 builds it)
 
-- **Window:** the title bar holds only the sidebar toggle and back/forward. No icon rail; settings sit at the bottom
-  of the sidebar. No top-level session tabs: sessions are picked in the sidebar; tabs exist only in the right panel.
-  If NSH cannot customize the Linux title bar, the system title bar stays and these buttons move to the top of the
-  sidebar.
+- **Window:** the system draws the title bar (`titleBar.style: "default"`; KWin's own on KDE Wayland), so its
+  buttons, tooltips, double click and window menu match every other window. Below it, a 48pt navigation row
+  (`NavBar`: sidebar toggle, back/forward, remote connections) heads the sidebar, level with the Session header. With
+  the sidebar hidden, the row leads the Session header, or tops the main area when no Session view is shown (empty
+  state, starting or failed host); the buttons keep the same x position in every case. The sidebar and the main
+  area meet flush under the title bar with one vertical divider. No icon rail; settings sit at the bottom of the
+  sidebar. No top-level session tabs: sessions are picked in the sidebar; tabs exist only in the right panel.
 - **Sidebar** (about 280pt, `sidebar`): host switcher ("This computer ▾", listing paired remote hosts); New session;
   Workspaces grouped by directory, each expanding to its sessions; Recent. Rows are 32pt pills; trailing marks show
   running and needs-attention states.
@@ -132,12 +135,12 @@ the content is new (a running turn), since the list remounts rows as they scroll
 | StatusDot running | Soft opacity pulse while running | Rests |
 | Layout changes, drags | None in the gallery | — |
 
-## Motion inventory: shell (title bar and sidebar)
+## Motion inventory: shell (navigation row and sidebar)
 
 | Change | Motion | Reduced motion |
 | --- | --- | --- |
 | Sidebar collapses / expands | `LayoutAnimation` for that update, `base`, ease-in-out; the main area widens with it | Jumps |
-| Title bar buttons hover / press | As IconButton (wash `instant`, press 0.95 `fast`) | No scale |
+| Navigation buttons hover / press | As IconButton (wash `instant`, press 0.95 `fast`) | No scale |
 | Back / Forward become enabled or disabled | Opacity `instant` | Instant |
 | Current session changes | The selected pill switches `instant` (dense list, no slide) | Instant |
 | Workspace group expands / collapses | Chevron rotates 90° `fast`; rows appear with `LayoutAnimation` `base` | Instant |
@@ -227,9 +230,7 @@ await app.screenshot("target/markdown-cjk-verified.png")
 STEPS
 ```
 
-With NSH 0.7.1 on Wayland, the title bar uses GTK's native window buttons with 32-point hit areas and line icons.
-Light and dark window captures covered the resting state. A Wayland window using the same controls and stylesheet
-confirmed maximize, restore, minimize and close. In a separate KWin Wayland session, fcitx5 Pinyin received key
+The window uses the system title bar; the app no longer styles GTK window buttons. In a KWin Wayland session, fcitx5 Pinyin received key
 events in the desktop composer. The first Enter committed the preedit to the draft and the next Enter sent it.
 
 ## Motion inventory: remote control
@@ -287,3 +288,14 @@ The GTK session fixture on Wayland showed the Chinese inspector beside the conve
 | 在单文件 diff 与变更列表间往返 | Diff 子顶栏左侧返回按钮退回按轮次分组的变更卡片列表，便于在窄窗口或多文件会话中切换文件 | 直接切换视图 |
 
 Wayland 同机双实例验收使用独立的设备身份和后端数据目录。控制端配对后从远程会话展开目录并读到了主机文件内容。1200 × 800 浅色窗口并排显示会话与预览，800 × 560 深色窗口中返回按钮恢复会话。原生交互测试覆盖快速切换预览、返回同一次编辑以及保留未发送草稿。
+
+### N3 会话详情卡
+
+| 交互 | 界面反馈 | 减少动态效果时 |
+| --- | --- | --- |
+| 宽会话中查看详情 | 对话列两侧都能放下 280 pt 卡片和 16 pt 边距时，卡片常驻在会话区右上角，不压缩对话 | 无动画 |
+| 窄会话或打开右侧面板时 | 卡片收起，顶栏出现「会话详情」按钮，点击后以弹层显示同样内容 | 弹层立即开合 |
+| 主机与在…中打开 | 第一行显示电脑图标和主机名：本机用远程控制的设备名，远程主机用配对名。本机行尾有文件夹按钮，用文件管理器打开工作区。第二行显示「在 Zed 中打开」，右侧下拉可以换编辑器；点击行用当前编辑器打开，只有在下拉中选择时才保存。PATH 上没有编辑器时不显示第二行，远程主机不显示打开入口。打开失败时，错误显示在卡片内 | 菜单立即开合 |
+| 会话关系 | 分隔线下方标题为「会话关系 · N 个运行中」。依次列出分叉来源、运行中的子代理（带转圈，显示昵称和相对时间），之前的子代理通过 `…` 菜单展开。点击任一行打开对应会话。主机离线时不显示转圈 | 转圈静止 |
+
+文本选择：NSH 0.7.2 在 Linux 上计算选区时，没有把指针坐标换算到可选视图自己的坐标系，选区会比指针低出该视图到窗口顶部的距离（longbridge/nsh#3568）。上游已在 `main` 修复，本项目改为从 GitHub 依赖 NSH 的 nightly 提交，删除了 `Shell` 根视图上的绕过方法，消息和工具输出各自是独立的可选区域。

@@ -1,4 +1,4 @@
-import { computed, untracked, View } from "nsh";
+import { computed, effect, signal, untracked, View } from "nsh";
 import { t } from "nsh/i18n";
 
 import type { MessageId, ToolCallId } from "../client/acp/protocol";
@@ -30,7 +30,7 @@ export type TurnSource = Readonly<{
 
 /** A blinking caret on the working header; still under reduced motion. */
 function Caret() {
-  return <View class={`h-4 w-1.5 rounded-full bg-foreground ${motionClass.pulse}`} />;
+  return <View class={`h-3.5 w-1 rounded-full bg-muted-foreground ${motionClass.pulse}`} />;
 }
 
 /** Renders message content in either the reply or an opened commentary row. */
@@ -78,22 +78,37 @@ function UserMessage(props: { message: MessageEntity; arriving?: boolean }) {
   );
 }
 
+/**
+ * Open state of a turn's disclosures. While the turn runs they start open, so its progress is visible, and a press
+ * folds one under a separate `live:` key; when the turn ends those keys stop counting and everything starts folded.
+ */
+function liveOpen(source: TurnSource, running: boolean, key: string): boolean {
+  return running ? !source.isOpen(`live:${key}`) : source.isOpen(key);
+}
+
+/** Folds or unfolds a disclosure under the key `liveOpen` reads for the turn's current state. */
+function liveToggle(source: TurnSource, running: boolean, key: string): void {
+  source.toggle(running ? `live:${key}` : key);
+}
+
 /** Discloses the individual steps of a contiguous stretch of work. */
 function WorkRows(props: { steps: readonly WorkStep[]; source: TurnSource; running: boolean }) {
   return (
-    <View class="ml-2.5 gap-1.5 border-l border-border pl-3">
+    <View class="ml-2.5 gap-1.5 border-l border-border pl-4">
       <Each of={props.steps} key={(step) => step.key}>
         {(step) => {
           // The keyed row's kind and entity identity stay fixed across streamed updates.
           const item = step();
           if (item.type === "tool") return <ToolRow id={item.toolCallId} source={props.source} />;
           if (item.type === "message") return (
-            <Disclosure label={t("turn.message")} open={props.source.isOpen(item.key)} onToggle={() => props.source.toggle(item.key)}>
+            <Disclosure flush label={t("turn.message")} icon="message-square" open={liveOpen(props.source, props.running, item.key)}
+              onToggle={() => liveToggle(props.source, props.running, item.key)}>
               <AssistantMessage message={props.source.message(item.messageId)} running={false} />
             </Disclosure>
           );
           return (
-            <Disclosure label={t("turn.thinking")} open={props.source.isOpen(item.key)} onToggle={() => props.source.toggle(item.key)}>
+            <Disclosure flush label={t("turn.thinking")} icon="brain" open={liveOpen(props.source, props.running, item.key)}
+              onToggle={() => liveToggle(props.source, props.running, item.key)}>
               <Markdown text={props.source.message(item.messageId)?.reasoning ?? ""} tone="muted" streaming={props.running} />
             </Disclosure>
           );
@@ -112,8 +127,21 @@ export function TurnRow(props: {
 }) {
   const changesKey = () => `files:${props.turn.key}`;
   const lastWork = computed(() => props.turn.sections.findLast((section) => section.type === "work")?.key);
-  const label = () => props.turn.running ? t("turn.working") : props.turn.durationMs === undefined
-    ? t("turn.work") : t("turn.workedFor", { duration: formatDuration(props.turn.durationMs) });
+  // A running turn's elapsed time ticks once a second; the timer stops as soon as the turn ends.
+  const now = signal(Date.now());
+  effect(() => {
+    if (!props.turn.running) return;
+    now.set(Date.now());
+    const timer = setInterval(() => now.set(Date.now()), 1000);
+    return () => clearInterval(timer);
+  });
+  const label = () => {
+    if (props.turn.running) {
+      const start = props.turn.startedAtMs;
+      return start === undefined ? t("turn.working") : t("turn.workingFor", { duration: formatDuration(now() - start) });
+    }
+    return props.turn.durationMs === undefined ? t("turn.work") : t("turn.workedFor", { duration: formatDuration(props.turn.durationMs) });
+  };
   return (
     <View class="w-full max-w-[760px] gap-3 self-center px-6 py-3">
       <If when={props.turn.userMessageId === undefined ? undefined : props.source.message(props.turn.userMessageId)}>
@@ -134,8 +162,10 @@ export function TurnRow(props: {
             return current.type === "work" ? current.steps : [];
           };
           return (
-            <Disclosure flush label={lastWork() === item.key ? label() : t("turn.work")} open={props.source.isOpen(item.key)}
-              onToggle={() => props.source.toggle(item.key)}
+            <Disclosure flush label={lastWork() === item.key ? label() : t("turn.work")}
+              accessibilityLabel={lastWork() === item.key && props.turn.running ? t("turn.working") : undefined}
+              open={liveOpen(props.source, props.turn.running, item.key)}
+              onToggle={() => liveToggle(props.source, props.turn.running, item.key)}
               trailing={<If when={props.turn.running && lastWork() === item.key}><Caret /></If>}>
               <WorkRows steps={steps()} source={props.source} running={props.turn.running} />
             </Disclosure>

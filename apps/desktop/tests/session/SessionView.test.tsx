@@ -50,26 +50,29 @@ test("work_discloses_each_thought_message_and_named_tool_independently", async (
   await app.waitFor("text:Fixed it.");
 });
 
-test("streaming_reply_stays_visible_while_work_is_folded", async () => {
+test("running_work_stays_open_and_folds_when_the_turn_ends", async () => {
   const app = await openEntry("session-running", { clock: {} });
   await app.waitFor("label:Working");
-  expect(app.texts()).not.toContain("Check the last error.");
+  // While the turn runs, its work and thinking show without a press.
+  await app.waitFor("text:Check the last error.");
   await app.waitFor("text:Looking at the logs");
   const streaming = ["Current file", "Build output", "Looking at the logs"];
   expect(app.texts().filter((value) => streaming.includes(value))).toEqual(streaming);
   expect(app.shows("label:Copy")).toBe(false);
   expect(app.shows("label:Assistant reply")).toBe(false);
-  await app.press("label:Working");
-  await app.press("label:Thinking");
-  await app.waitFor("text:Check the last error.");
+  // The reader can still fold the live work, and open it again.
   await app.press("label:Working");
   expect(app.texts()).not.toContain("Check the last error.");
+  await app.press("label:Working");
+  await app.waitFor("text:Check the last error.");
   await app.waitFor("text:Looking at the logs");
   await app.wait(10000);
   await app.waitFor("label:Copy");
   const final = ["Final file", "Final output", "Build passed."];
   expect(app.texts().filter((value) => final.includes(value))).toEqual(final);
   expect(app.texts()).not.toContain("Current file");
+  // Once the turn ends, its work folds away.
+  expect(app.texts()).not.toContain("Check the last error.");
   await app.press("label:Copy");
   await app.waitUntil(() => app.clipboard() === "Final fileBuild passed.");
 });

@@ -1,4 +1,4 @@
-import { Text, View } from "nsh";
+import { computed, Text, View } from "nsh";
 import { t } from "nsh/i18n";
 import { AlertDialog, Dialog as BaseDialog, Sheet as BaseSheet } from "nsh/base";
 import type { JSX } from "nsh/jsx-runtime";
@@ -27,6 +27,8 @@ export function Dialog(props: {
   controlledDismissal?: boolean;
   onClose: () => void;
 }) {
+  // A JSX slot is a getter that builds a new element on every read, `If`'s accessor included; read it once.
+  const actions = computed(() => props.actions);
   return (
     <BaseDialog
       open={props.open}
@@ -44,8 +46,8 @@ export function Dialog(props: {
     >
       <PanelHeader title={props.title} onClose={props.onClose} />
       {props.children}
-      <If when={props.actions !== undefined}>
-        <View class="flex-row justify-end gap-2">{props.actions}</View>
+      <If when={actions()}>
+        <View class="flex-row justify-end gap-2">{actions()}</View>
       </If>
     </BaseDialog>
   );
