@@ -9,6 +9,8 @@ use crate::{SessionEntry, SessionRecord, StoreError};
 #[derive(Clone, typed_builder::TypedBuilder)]
 pub(super) struct SessionState {
     pub(super) next_sequence: u64,
+    #[builder(default)]
+    pub(super) first_local_sequence: Option<u64>,
     pub(super) lanes: HashMap<LaneId, Option<EntryId>>,
     pub(super) entries: HashMap<EntryId, SessionEntry>,
     pub(super) entry_order: Vec<EntryId>,
@@ -24,11 +26,12 @@ pub(super) struct SessionState {
 
 impl SessionState {
     /// Creates pi's implicit root `main` lane and empty append-only state.
-    pub(super) fn new() -> Result<Self, StoreError> {
+    pub(super) fn new(forked: bool) -> Result<Self, StoreError> {
         let main = LaneId::try_from("main")
             .map_err(|error| StoreError::InvalidSession(error.to_string()))?;
         Ok(Self::builder()
             .next_sequence(0)
+            .first_local_sequence((!forked).then_some(0))
             .lanes(HashMap::from([(main, None)]))
             .entries(HashMap::new())
             .entry_order(Vec::new())

@@ -23,7 +23,7 @@ export function Disclosure(props: {
         onPress={props.onToggle}
         selected={props.open}
         accessibilityLabel={props.label}
-        class={`group flex-row items-center gap-1.5 self-start rounded-(--radius) px-1 py-0.5 hover:bg-accent ${focusRing} ${motionClass.wash}`}
+        class={`group flex-row items-center gap-1.5 self-start rounded-(--radius) px-2 py-1 hover:bg-accent ${focusRing} ${motionClass.wash}`}
       >
         <If when={props.icon}>{(icon) => <Icon name={icon()} size="sm" color="muted-foreground" />}</If>
         <Text class={`${type.ui} text-muted-foreground group-hover:text-foreground`}>{props.label}</Text>

@@ -31,7 +31,7 @@ export function ListItem(props: {
     >
       <If when={props.icon}>{(icon) => <Icon name={icon()} size="md" color="muted-foreground" />}</If>
       <View class="flex-1">
-        <Text class={`${type.ui} text-foreground truncate`}>{props.label}</Text>
+        <Text class={`${type.ui} text-foreground group-selected:font-medium truncate`}>{props.label}</Text>
         <If when={props.description}>{(text) => <Text class={`${type.meta} text-muted-foreground truncate`}>{text()}</Text>}</If>
       </View>
       {props.trailing}

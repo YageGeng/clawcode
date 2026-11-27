@@ -153,6 +153,7 @@ impl JsonRpcMessage for IntegrationRequest {
             || method == AcpExtensionMethod::InvokeSkill.as_str()
             || method == AcpExtensionMethod::SkillList.as_str()
             || method == AcpExtensionMethod::McpStatus.as_str()
+            || method == AcpExtensionMethod::PendingMessages.as_str()
             || method == AcpExtensionMethod::PendingMessageRemove.as_str()
             || method == AcpExtensionMethod::UserBash.as_str()
             || method == AcpExtensionMethod::Navigate.as_str()
@@ -205,6 +206,11 @@ impl JsonRpcMessage for IntegrationRequest {
                 AcpExtensionMethod::McpStatus.as_str()
             }
             method
+                if method == AcpExtensionMethod::PendingMessages.as_str() =>
+            {
+                AcpExtensionMethod::PendingMessages.as_str()
+            }
+            method
                 if method
                     == AcpExtensionMethod::PendingMessageRemove.as_str() =>
             {
@@ -227,6 +233,43 @@ impl JsonRpcMessage for IntegrationRequest {
             parameters: params.clone(),
         })
     }
+}
+
+/// Compact reservation queries omit both message lanes while existing clients retain their queue.
+#[tokio::test]
+async fn pending_messages_can_return_only_question_reservations() {
+    let workspace = tempfile::tempdir().expect("workspace");
+    let state = tempfile::tempdir().expect("store");
+    let kernel = integration_kernel(state.path());
+    let session = send_request(
+        Arc::clone(&kernel),
+        IntegrationRequest::new(
+            SESSION_NEW_METHOD,
+            serde_json::json!({ "cwd": workspace.path() }),
+        ),
+    )
+    .await
+    .expect("session");
+    let session_id = &session["sessionId"];
+    let method = AcpExtensionMethod::PendingMessages.as_str();
+    let compact = send_request(
+        Arc::clone(&kernel),
+        IntegrationRequest::new(method, serde_json::json!({ "sessionId": session_id, "questionsOnly": true })),
+    ).await.expect("compact reservations");
+    assert_eq!(compact, serde_json::json!({ "reservedQuestions": [] }));
+    let full = send_request(
+        kernel,
+        IntegrationRequest::new(
+            method,
+            serde_json::json!({ "sessionId": session_id }),
+        ),
+    )
+    .await
+    .expect("full queue");
+    assert_eq!(
+        full,
+        serde_json::json!({ "reservedQuestions": [], "steering": [], "followUp": [] })
+    );
 }
 
 /// ACP exposes the latest MCP snapshot and rejects extra status parameters.
@@ -2012,8 +2055,9 @@ async fn default_config_lists_the_options_of_a_new_session() {
         .iter()
         .filter_map(|option| option["configId"].as_str())
         .collect();
-    assert_eq!(ids, ["model", "thinking_level", "mode"]);
+    assert_eq!(ids, ["model", "thinking_level", "mode", "file_approval"]);
     assert_eq!(options[2]["currentValue"], "default");
+    assert_eq!(options[3]["currentValue"], "host");
 }
 
 /// Workspace tools answer through the public connection and refuse paths outside the root.

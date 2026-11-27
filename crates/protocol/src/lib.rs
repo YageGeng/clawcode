@@ -30,9 +30,9 @@ mod workspace;
 pub use acp::{
     AcpCommandParameters, AcpCompactParameters, AcpExecTerminateParameters,
     AcpForkParameters, AcpNavigateParameters,
-    AcpPendingMessageRemoveParameters, AcpQuestionDismissParameters,
-    AcpSessionParameters, AcpSkillParameters, AcpUserBashParameters,
-    AcpWorkingDirectory, AcpWorkingDirectoryError,
+    AcpPendingMessageRemoveParameters, AcpPendingMessagesParameters,
+    AcpQuestionDismissParameters, AcpSessionParameters, AcpSkillParameters,
+    AcpUserBashParameters, AcpWorkingDirectory, AcpWorkingDirectoryError,
 };
 pub use agent::{
     AGENT_MESSAGE_TYPE, AgentMail, AgentName, AgentNickname, AgentPath,
@@ -46,9 +46,9 @@ pub use capability::{
     CompactionOperationKind, CompactionOperationOutcome,
     CompactionOperationStarted, CompactionOutcome, CompactionPolicy,
     CompactionReason, CompactionResult, CompactionStep, CompactionStepAttempt,
-    CompactionUsageCause, CompactionUsageRecord, ModelInputModalities,
-    ModelInputModalitiesError, ModelInputModality, ModelProfile, RetryPolicy,
-    SessionSettings, SessionTitle,
+    CompactionUsageCause, CompactionUsageRecord, FileApprovalMode,
+    ModelInputModalities, ModelInputModalitiesError, ModelInputModality,
+    ModelProfile, RetryPolicy, SessionSettings, SessionTitle,
 };
 pub use event::{AgentEvent, AgentEventPayload, AgentOutcome, EventMetadata};
 pub use exec::{

@@ -138,10 +138,17 @@ impl Kernel {
             turn_id: first_turn_id.clone(),
             sink: Arc::clone(&sink),
         })?;
+        // Keep reservations until all writes finish, including early returns and dropped futures.
+        let _questions = queue::RunQuestionReservations {
+            kernel: self,
+            session_id: &request.session_id,
+            execution: &session.execution,
+        };
         // A first-input reply is written only in the first Turn; it is recorded
         // before the ticket is released so the next settlement sees it.
         if let protocol::RunInput::QuestionReply(reply) = &request.input {
             session.execution.reserve_reply_keys(reply)?;
+            self.publish_queue_changed(&request.session_id);
         }
         if let Some(ticket) = &invocation.admission {
             ticket.release();

@@ -92,7 +92,7 @@ fn fork_copies_the_contents_its_branch_addresses() {
     let source_path = source.path().to_path_buf();
     drop(source);
 
-    let fork = factory
+    let mut fork = factory
         .fork(
             &source_path,
             SessionForkOptions {
@@ -130,4 +130,13 @@ fn fork_copies_the_contents_its_branch_addresses() {
             .unwrap_or_else(|| panic!("{needle} not logged"))
     };
     assert!(line("content-t") < line("entry-0"));
+
+    // Replaying copied request contents and a linear branch cannot establish
+    // local authorship. A subsequent name fact belongs only to this fork.
+    assert_eq!(fork.first_local_sequence(), None);
+    fork.set_name(Some("local name".into())).expect("rename");
+    let boundary = Some(fork.last_sequence());
+    assert_eq!(fork.first_local_sequence(), boundary);
+    let reopened = factory.open(fork.path()).expect("reopen");
+    assert_eq!(reopened.first_local_sequence(), boundary);
 }

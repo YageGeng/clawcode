@@ -3,6 +3,7 @@ import { t } from "nsh/i18n";
 
 import type { SessionId } from "../client/acp/protocol";
 import type { AppStore } from "../stores/app";
+import { Button } from "../ui/button";
 import { ListItem } from "../ui/list";
 import { HostSwitcher } from "./HostSwitcher";
 import { SidebarRowView, sidebarRows } from "./SessionRows";
@@ -28,7 +29,13 @@ export function Sidebar(props: { store: AppStore; onOpenSettings: () => void; on
   const context = {
     selected: (sessionId: SessionId) => props.store.location().hostId === host().info.id && props.store.location().sessionId === sessionId,
     running: (sessionId: SessionId) => host().running(sessionId),
-    needsAttention: (sessionId: SessionId) => host().permissionFor(sessionId) !== undefined,
+    /** Approval takes precedence when the same Session also has unanswered questions. */
+    attentionLabel: (sessionId: SessionId) => {
+      const current = host();
+      if (current.phase().kind !== "ready") return undefined;
+      if (current.permissionFor(sessionId)) return t("session.needsAttention");
+      return current.awaitsAnswer(sessionId) ? t("session.awaitsAnswer") : undefined;
+    },
     openSession: (sessionId: SessionId) => props.store.openSession(host().info.id, sessionId),
     toggleWorkspace: (cwd: string) =>
       expanded.update((open) => {
@@ -39,17 +46,19 @@ export function Sidebar(props: { store: AppStore; onOpenSettings: () => void; on
       }),
   };
   return (
-    <View class="w-[280px] gap-1 bg-sidebar px-2 pb-2">
-      <View class="items-start px-0.5 pb-1">
+    <View class="w-[280px] gap-1.5 bg-sidebar px-2.5 pb-2.5">
+      <View class="items-start pb-0.5">
         <HostSwitcher store={props.store} onAddHost={props.onAddHost} />
       </View>
       <If when={host().phase().kind === "ready"}>
-        <ListItem label={t("shell.newSession")} icon="square-pen" onPress={() => props.store.selectHost(host().info.id)} />
+        <Button label={t("shell.newSession")} icon="square-pen" variant="outline" class="w-full justify-start shadow-2xs" onPress={props.store.beginDraft} />
       </If>
       <List each={rows()} keyExtractor={(row) => row.key} estimatedItemSize={32} class="flex-1">
         {(row) => <SidebarRowView row={row()} context={context} />}
       </List>
-      <ListItem label={t("shell.settings")} icon="settings" onPress={props.onOpenSettings} />
+      <View class="border-t border-border pt-2">
+        <ListItem label={t("shell.settings")} icon="settings" onPress={props.onOpenSettings} />
+      </View>
     </View>
   );
 }

@@ -1,8 +1,9 @@
 import type { SessionId, SessionUpdateNotification } from "../acp/protocol";
-import { reduceWorkspace, sessionWorkspace } from "./state";
+import { reduceWorkspace, sessionWorkspace, withSessionWorkspaces } from "./state";
 import type { WorkspaceAction, WorkspaceState } from "./state";
 import { initialSessionWorkspaceState, SessionWorkspaceStager } from "./sessionState";
 import type { SessionWorkspaceState } from "./sessionState";
+import type { InteractionChange } from "./interactions";
 import { SessionRecoveryBuffer } from "./recovery";
 import { SessionUpdateDecoder } from "./updateDecoder";
 
@@ -13,6 +14,8 @@ export type WorkspaceStoreAccess = Readonly<{
 
 /** What the router asks its host to fetch again after a frame. */
 export type RouterRefreshes = Readonly<{
+  /** Replays the new active branch after another client navigates the Session tree. */
+  branch: (sessionId: SessionId) => Promise<void>;
   /** Re-reads one Session's run state (an idle update may race a new turn). */
   runtime: (sessionId: SessionId) => Promise<void>;
   /** Re-lists the Sessions (a spawn tool named a child the list does not have yet). */
@@ -27,6 +30,7 @@ export class SessionUpdateRouter {
   private readonly recovery: SessionRecoveryBuffer;
   // A replacement history stays private until resume succeeds. Live state still goes to the workspace.
   private readonly replays = new Map<SessionId, { history: SessionWorkspaceStager; valid: boolean }>();
+  private readonly branches = new Map<SessionId, { version: number; awaitingReplay: boolean }>();
   private receivedOrder = 0;
 
   /** Creates a router whose state reads and writes use the same store instance. */
@@ -37,11 +41,17 @@ export class SessionUpdateRouter {
     this.refreshes = refreshes;
   }
 
+  /** Identifies the local branch projection to which an asynchronous response belongs. */
+  branchVersion(sessionId: SessionId): number {
+    return this.branches.get(sessionId)?.version ?? 0;
+  }
+
   /** Applies one transport frame's updates, committing their actions to the store once. */
   applyMany(notifications: readonly SessionUpdateNotification[]): void {
     const current = this.store.getState();
     let workspaceDraft = current;
     const refreshRuntime = new Set<SessionId>();
+    const refreshBranches = new Set<SessionId>();
     let newChild = false;
     const touchedSessions = new Set<SessionId>();
     const stagers = new Map<SessionId, SessionWorkspaceStager>();
@@ -60,10 +70,17 @@ export class SessionUpdateRouter {
           const history = this.replays.get(item.sessionId)?.history ?? stager;
           const entities = history.snapshot();
           const decoded = this.decoder.decode(item, entities, ++this.receivedOrder);
-          if (decoded.scope === "global") {
+          if (decoded.scope === "branch") {
+            // Frames from an already requested resume can still follow this notification. Drain its
+            // response before accepting history again, and withdraw cards from the old branch now.
+            this.branches.set(item.sessionId, { version: this.branchVersion(item.sessionId) + 1, awaitingReplay: true });
+            stager.apply({ type: "transcript/cleared" });
+            refreshBranches.add(item.sessionId);
+          } else if (decoded.scope === "global") {
             for (const action of decoded.actions) workspaceDraft = reduceWorkspace(workspaceDraft, action);
           } else {
             for (const action of decoded.actions) {
+              if (action.type !== "running/changed" && this.branches.get(item.sessionId)?.awaitingReplay) continue;
               if (action.type === "tool/upserted") {
                 const child = action.tool.subagentSessionId;
                 // List a child once, when its spawn tool first names it, not on every later update of that tool.
@@ -90,6 +107,9 @@ export class SessionUpdateRouter {
       }
       throw reason;
     }
+    for (const sessionId of refreshBranches) {
+      void this.refreshes.branch(sessionId).catch(() => console.warn(`Could not replay the active branch for Session ${sessionId}`));
+    }
     for (const sessionId of refreshRuntime) {
       void this.refreshes.runtime(sessionId).catch((reason: unknown) => console.warn(`refresh the run state of ${sessionId}: ${String(reason)}`));
     }
@@ -100,36 +120,50 @@ export class SessionUpdateRouter {
 
   /** Merges staged Session projections into one WorkspaceState; `workspaceDraft` itself when no Session changed. */
   private commitStaged(workspaceDraft: WorkspaceState, stagers: ReadonlyMap<SessionId, SessionWorkspaceStager>): WorkspaceState {
-    let sessionWorkspaces: Map<SessionId, SessionWorkspaceState> | undefined;
+    const replacements: [SessionId, SessionWorkspaceState][] = [];
     for (const [sessionId, stager] of stagers) {
       const committed = stager.commit();
-      if (committed === sessionWorkspace(workspaceDraft, sessionId)) continue;
-      sessionWorkspaces ??= new Map(workspaceDraft.sessionWorkspaces);
-      sessionWorkspaces.set(sessionId, committed);
+      if (committed !== sessionWorkspace(workspaceDraft, sessionId)) replacements.push([sessionId, committed]);
     }
-    return sessionWorkspaces === undefined ? workspaceDraft : { ...workspaceDraft, sessionWorkspaces };
+    return replacements.length ? withSessionWorkspaces(workspaceDraft, replacements) : workspaceDraft;
   }
 
-  /** Streams a first history immediately, or replaces an existing history only after a complete replay. */
-  async replay(sessionId: SessionId, resume: () => Promise<unknown>): Promise<void> {
-    this.recovery.requireFullReplay(sessionId);
-    if (!sessionWorkspace(this.store.getState(), sessionId).transcript.length) {
-      this.store.dispatch({ type: "session/updated", sessionId, action: { type: "transcript/cleared" } });
-      await resume();
-      return;
-    }
+  /** Routes an RPC's interaction snapshot to the same branch draft as subsequent notifications. */
+  applyInteraction(sessionId: SessionId, change: InteractionChange): void {
+    if (this.needsBranchReplay(sessionId)) return;
+    const action = { type: "interactions/changed", change } as const;
+    const replay = this.replays.get(sessionId);
+    if (replay) replay.history.apply(action);
+    else this.store.dispatch({ type: "session/updated", sessionId, action });
+  }
 
+  /** Reports whether navigation or an interrupted attachment still needs a complete replacement history. */
+  needsBranchReplay(sessionId: SessionId): boolean {
+    return this.branches.get(sessionId)?.awaitingReplay === true;
+  }
+
+  /** Publishes a complete history and its question reservations together, including on first attachment. */
+  async replay(sessionId: SessionId, resume: (history: SessionWorkspaceStager) => Promise<void>): Promise<void> {
+    this.recovery.requireFullReplay(sessionId);
+    const branch = this.branches.get(sessionId);
     const replay = { history: new SessionWorkspaceStager(initialSessionWorkspaceState), valid: true };
     this.replays.set(sessionId, replay);
+    if (branch) branch.awaitingReplay = false;
     try {
-      await resume();
+      await resume(replay.history);
+      if (this.branches.get(sessionId) !== branch) return;
       if (!replay.valid) throw new Error("Session history replay was incomplete");
       const state = this.store.getState();
-      const current = state.sessionWorkspaces.get(sessionId);
-      if (!current) return; // A directory refresh removed the Session while resume was pending.
-      const replacement = { ...replay.history.commit(), running: current.running };
-      const sessionWorkspaces = new Map(state.sessionWorkspaces).set(sessionId, replacement);
-      this.store.dispatch({ type: "workspace/committed", state: { ...state, sessionWorkspaces } });
+      if (!state.sessions.some((session) => session.sessionId === sessionId)) return;
+      const replacement = { ...replay.history.commit(), running: sessionWorkspace(state, sessionId).running };
+      this.store.dispatch({ type: "workspace/committed", state: withSessionWorkspaces(state, [[sessionId, replacement]]) });
+    } catch (reason: unknown) {
+      // A failed resume can leave a partial branch on the wire. Only a new full replay can fill the gap.
+      if (this.branches.get(sessionId) === branch) {
+        this.branches.set(sessionId, { version: branch?.version ?? 0, awaitingReplay: true });
+      }
+      this.recovery.requireFullReplay(sessionId);
+      throw reason;
     } finally {
       this.replays.delete(sessionId);
     }

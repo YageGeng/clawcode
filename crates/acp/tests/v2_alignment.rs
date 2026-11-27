@@ -2923,7 +2923,7 @@ async fn close_delivers_final_queue_and_cancels_all_busy_prompts() {
                     .expect("queue snapshot delivered before close response");
                 assert_eq!(
                     last["payload"]["pending"],
-                    serde_json::json!({"steering":[],"followUp":[]})
+                    serde_json::json!({"steering":[],"followUp":[],"reservedQuestions":[]})
                 );
             };
             let (answers, ()) =
@@ -3248,7 +3248,7 @@ async fn invalid_question_reply_meta_is_rejected() {
     .await;
 }
 
-/// The skip method writes once and refuses unknown fields.
+/// The skip method identifies exactly which keys it accepted, writes once and refuses unknown fields.
 #[tokio::test]
 async fn dismiss_method_round_trips() {
     let root = tempfile::tempdir().unwrap();
@@ -3265,13 +3265,19 @@ async fn dismiss_method_round_trips() {
             next_matching(updates, |value| is_idle(value, "end_turn")).await;
             let parameters = serde_json::json!({
                 "sessionId": asked.session.to_string(),
-                "items": [{ "requestId": asked.request_id, "index": 0 }]
+                "items": [
+                    { "requestId": asked.request_id, "index": 1 },
+                    { "requestId": asked.request_id, "index": 0 }
+                ]
             });
             assert_eq!(
                 asked.dismiss(parameters.clone()).await?,
-                serde_json::json!({})
+                serde_json::json!({ "skipped": [{ "requestId": asked.request_id, "index": 0 }], "reservedQuestions": [] })
             );
-            assert_eq!(asked.dismiss(parameters).await?, serde_json::json!({}));
+            assert_eq!(
+                asked.dismiss(parameters).await?,
+                serde_json::json!({ "skipped": [], "reservedQuestions": [] })
+            );
             assert_eq!(asked.replies(&kernel).len(), 1);
             let error = asked
                 .dismiss(serde_json::json!({

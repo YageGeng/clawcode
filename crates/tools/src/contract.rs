@@ -27,6 +27,14 @@ impl ToolUpdateSink for DiscardToolUpdates {
 /// Authorizes one built-in mutation of a resolved file outside the session workspace.
 #[async_trait]
 pub trait FileMutationApprover: Send + Sync {
+    /// Selects isolated filesystem operations before resolving this mutation's physical target.
+    fn requires_guarded_save(
+        &self,
+        _call: &ToolCall,
+    ) -> Result<bool, ToolError> {
+        Ok(true)
+    }
+
     /// Waits for the decision about this call and target before any mutation.
     async fn approve(
         &self,
@@ -53,7 +61,7 @@ pub struct ToolExecutionContext {
     /// Destination for replaceable partial tool snapshots.
     pub updates: Arc<dyn ToolUpdateSink>,
 
-    /// Approval channel installed when the session uses on-request file permissions.
+    /// Host policy for saving files and authorizing individual external writes and edits.
     #[builder(default)]
     pub file_mutation_approver: Option<Arc<dyn FileMutationApprover>>,
 }

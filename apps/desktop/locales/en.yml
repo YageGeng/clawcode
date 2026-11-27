@@ -22,6 +22,8 @@ host:
     unanswered: "Backend did not answer: %{detail}"
     stopped: "Backend stopped: %{detail}"
 notice:
+  replayFailed: "Could not load the active branch of %{session}"
+  reopenToRetry: Select the session again to reload its history.
   newSessionFailed: Could not start the session
   promptFailed: The message was not sent
 shell:
@@ -39,25 +41,24 @@ shell:
 session:
   running: Running
   needsAttention: Needs your approval
+  awaitsAnswer: Awaiting your answer
   jumpToBottom: Jump to bottom
 empty:
   heading: What should we build in
   headingAfter: "?"
   chooseFolder: Choose folder…
 turn:
+  skippedQuestion: Skipped question
+  thinking: Thinking
+  message: Assistant message
+  proposedPlan: Proposed plan
+  work: Work details
+  changedFiles: "Changed files (%{count})"
   workedFor: Worked for %{duration}
   working: Working
 time:
   seconds: "%{s}s"
   minutesSeconds: "%{m}m %{s}s"
-tools:
-  ran: Ran commands
-  edited: Edited files
-  read: Read files
-  searched: Searched
-  fetched: Fetched pages
-  other: Used tools
-  separator: ", "
 changes:
   edited: Edited %{file}
 composer:
@@ -65,8 +66,34 @@ composer:
   placeholder: Ask anything
   send: Send
   stop: Stop
-  attach: Attach files
-  attachSoon: Attachments are coming soon
+  attach: Attach images
+  settings: Session settings
+  modelLabel: Model
+  thinkingLabel: Thinking level
+  modeLabel: Session mode
+  updating: Updating session settings
+  updateFailed: Could not change the session setting. Try again.
+  noModelSettings: This session offers no model or thinking settings.
+  mode:
+    default: Default
+    plan: Plan
+  thinking_level:
+    "off": "Off"
+    minimal: Minimal
+    low: Low
+    medium: Medium
+    high: High
+    x_high: Extra high
+attachments:
+  oneImage: 1 image
+  manyImages: "%{count} images"
+  formats: Images
+  remove: "Remove %{name}"
+  tooMany: Attach up to 5 images per message.
+  tooLarge: Each image must be 10 MiB or smaller.
+  totalSize: Attach up to 20 MiB of images per message.
+  unsupported: Choose a non-empty PNG, JPEG, GIF or WebP image.
+  remoteSize: This message exceeds the remote connection’s 32 MiB limit. Shorten the text or remove an image.
 remote:
   title: Remote control
   allowControl: Allow remote control
@@ -124,3 +151,61 @@ remote:
     unavailable: Check that the other computer is online and allows remote control.
     closed: The remote connection closed.
     self: This code belongs to this computer. Use a code from another computer.
+
+commands:
+  available: Available commands
+  noMatches: No matching commands
+interactions:
+  plan: "Plan"
+  approved: "Approved plan"
+  tasks: "Plan · %{done} of %{total} tasks done"
+  pending: "Pending"
+  active: "In progress"
+  completed: "Done"
+  proposal: "Approve this plan?"
+  approve: "Approve and execute"
+  keepPlanning: "Keep planning"
+  question: "Question %{current} of %{total}"
+  previous: "Previous question"
+  next: "Next question"
+  choice: "Choose an answer"
+  other: "Other"
+  freeText: "Your answer"
+  skip: "Skip"
+  skipAll: "Skip all"
+  send: "Send answer"
+  failed: "Couldn’t submit the response. Try again."
+  closed: "This question has already been answered or skipped."
+  offline: "The host is offline."
+  emptyAnswer: "Enter an answer."
+fileApproval:
+  title: File approvals
+  host: Host default
+  hostHelp: Follow the host’s file approval policy.
+  ask: Ask every time
+  askHelp: Ask before built-in tools write or edit outside the workspace.
+  allow: Allow external writes
+  allowHelp: Let this session write or edit files outside its workspace automatically.
+toolDetail:
+  input: Input
+  result: Result
+  rawResult: Raw result
+  waiting: Waiting for the result…
+  noOutput: No output.
+  emptyValue: "(empty)"
+  before: Before
+  after: After
+  bytes: "%{count} bytes"
+  image: Image
+  audio: Audio
+  resource: Resource
+  resource_link: Resource link
+  terminal: "Terminal %{id}"
+  exitCode: "Exit code %{code}"
+  signal: "Signal %{signal}"
+  status:
+    pending: Pending
+    in_progress: Running
+    completed: Completed
+    failed: Failed
+    cancelled: Cancelled

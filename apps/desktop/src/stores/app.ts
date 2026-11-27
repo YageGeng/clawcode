@@ -2,6 +2,7 @@ import { signal } from "nsh";
 import type { Accessor } from "nsh";
 
 import type { SessionId } from "../client/acp/protocol";
+import type { PromptDraft } from "../client/acp/prompt";
 import { messageOf } from "../client/errors";
 import type { HostStore } from "./host";
 import { NavigationHistory } from "./navigation";
@@ -18,10 +19,17 @@ export type AppStore = Readonly<{
   addHost: (host: HostStore) => void;
   /** Shows a host with no Session open. */
   selectHost: (hostId: string) => void;
+  /** Starts a fresh draft on this host, including when another draft is already visible. */
+  beginDraft: () => void;
   /** Opens a Session; the sidebar follows to its host (spec §4.4). */
   openSession: (hostId: string, sessionId: SessionId) => void;
-  /** Creates a Session in `cwd` on the host, shows it and sends `text` as its first prompt; rejects when no Session could be created. */
-  startSession: (hostId: string, cwd: string, text: string) => Promise<void>;
+  /** Sends the first prompt to a prepared Session, or creates one in the selected workspace. */
+  startSession: (hostId: string, draft: PromptDraft, options: {
+    /** Creates or reattaches the Session belonging to this workspace visit. */
+    session: () => Promise<SessionId>;
+    /** Whether the original editor and workspace still own the submitted draft. */
+    canOpen: () => boolean;
+  }) => Promise<void>;
   back: () => void;
   forward: () => void;
   /** Starts every host independently; one failing does not stop the others. */
@@ -80,17 +88,25 @@ export function createAppStore(initialHosts: readonly HostStore[]): AppStore {
       });
     },
     selectHost: (hostId) => go({ hostId, sessionId: null }),
+    beginDraft: () => {
+      history.beginDraft();
+      publish();
+    },
     openSession: (hostId, sessionId) => {
       go({ hostId, sessionId });
       if (history.current.hostId === hostId) attachCurrent();
     },
-    startSession: async (hostId, cwd, text) => {
+    startSession: async (hostId, draft, options) => {
       const host = find(hostId);
       if (host === undefined) throw new Error(`no host ${hostId}`);
-      // `newSession` already replays the new Session, so this navigates without `openSession`'s second replay.
-      const sessionId = await host.newSession(cwd);
-      go({ hostId, sessionId });
-      await host.prompt(sessionId, text);
+      const origin = history.current;
+      const sessionId = await options.session();
+      // A slow creation still sends to its original Session. Later edits and workspace visits keep the editor.
+      if (history.current === origin && origin.hostId === hostId && find(hostId) === host && options.canOpen()) {
+        go({ hostId, sessionId });
+      }
+      // The host owns delivery, failed drafts and notices. A subsequent draft can send when creation completes.
+      void host.prompt(sessionId, draft.text, draft.images);
     },
     back: () => {
       if (history.back() !== undefined) {

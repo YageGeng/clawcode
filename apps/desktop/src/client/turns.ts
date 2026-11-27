@@ -1,24 +1,25 @@
 import type { MessageId, ToolCallId } from "./acp/protocol";
-import type { FileChange, ToolKind } from "./domain/model";
+import { AcpProtocol } from "./acp/protocol";
+import type { FileChange } from "./domain/model";
 import type { SessionWorkspaceState } from "./workspace/sessionState";
-
-/** What a group of consecutive tool calls did, for its one-line summary. */
-export type ToolActivity = "ran" | "edited" | "read" | "searched" | "fetched" | "other";
 
 /** One item inside a turn's folded work; `key` is stable while the turn grows. */
 export type WorkStep =
-  | Readonly<{ type: "message"; key: string; messageId: MessageId }>
-  | Readonly<{ type: "tools"; key: string; toolCallIds: readonly ToolCallId[]; activities: readonly ToolActivity[] }>;
+  | Readonly<{ type: "thought" | "message"; key: string; messageId: MessageId }>
+  | Readonly<{ type: "tool"; key: string; toolCallId: ToolCallId }>;
+
+/** Decisions stay visible between the chronological stretches of folded work. */
+export type TurnSection =
+  | Readonly<{ type: "work"; key: string; steps: readonly WorkStep[] }>
+  | Readonly<{ type: "decision" | "answer"; key: string; messageId: MessageId }>;
 
 /** A user message and everything the agent did for it. */
 export type TurnView = Readonly<{
   /** The user message id, or the first entry's key for a turn without one. */
   key: string;
   userMessageId?: MessageId;
-  /** Commentary and tool groups before the answer. */
-  steps: readonly WorkStep[];
-  /** The last assistant message once the turn ended. */
-  answerMessageId?: MessageId;
+  /** Ordered work disclosures, user decisions and the directly visible final or streaming reply. */
+  sections: readonly TurnSection[];
   /** Changed files merged per path, in first-seen order. */
   changes: readonly FileChange[];
   running: boolean;
@@ -26,28 +27,26 @@ export type TurnView = Readonly<{
   durationMs?: number;
 }>;
 
-/** The summary activity of one tool kind. */
-export function toolActivity(kind: ToolKind | undefined): ToolActivity {
-  switch (kind) {
-    case "execute": return "ran";
-    case "edit":
-    case "delete":
-    case "move": return "edited";
-    case "read": return "read";
-    case "search": return "searched";
-    case "fetch": return "fetched";
-    default: return "other";
-  }
-}
-
 /** The files a tool's content changed with their added and removed line counts, from its `diff` items. */
 export function fileChanges(content: readonly unknown[]): readonly FileChange[] {
   return content.flatMap((item): FileChange[] => {
-    if (typeof item !== "object" || item === null) return [];
-    const record = item as Record<string, unknown>;
-    if (record.type !== "diff" || typeof record.path !== "string" || typeof record.newText !== "string") return [];
-    const oldText = typeof record.oldText === "string" ? record.oldText : "";
-    return [{ path: record.path, ...lineCounts(oldText, record.newText) }];
+    const record = AcpProtocol.record(item);
+    if (record?.type !== "diff") return [];
+    if (typeof record.path === "string" && typeof record.newText === "string") {
+      return [{ path: record.path, ...lineCounts(typeof record.oldText === "string" ? record.oldText : "", record.newText) }];
+    }
+    // The built-in edit emits one git patch per destination. Count only the hunk body, including lines starting with +++ or ---.
+    const patch = AcpProtocol.record(record.patch);
+    const change = Array.isArray(record.changes) && record.changes.length === 1 ? AcpProtocol.record(record.changes[0]) : undefined;
+    if (patch?.format !== "git_patch" || typeof patch.text !== "string" || typeof change?.path !== "string") return [];
+    let added = 0, removed = 0, inHunk = false;
+    for (const line of patch.text.split("\n")) {
+      if (line.startsWith("diff --git ")) inHunk = false;
+      else if (line.startsWith("@@ ")) inHunk = true;
+      else if (inHunk && line.startsWith("+")) added++;
+      else if (inHunk && line.startsWith("-")) removed++;
+    }
+    return [{ path: change.path, added, removed }];
   });
 }
 
@@ -74,97 +73,123 @@ function lineCounts(oldText: string, newText: string): Readonly<{ added: number;
 /** A turn being collected: entries in order, plus the user message that opened it. */
 type Collecting = { userMessageId?: MessageId; entries: Array<Readonly<{ type: "message"; id: MessageId } | { type: "tool"; id: ToolCallId }>> };
 
-/**
- * Splits a Session's transcript into turns at user messages and folds each turn's work (spec §5.1).
- * Turns equal to one in `previous` are that turn, and an unchanged result is `previous` itself, so
- * a streamed token, which changes only a message's text, redraws no row.
- */
-export function groupTurns(session: SessionWorkspaceState, previous: readonly TurnView[] = []): readonly TurnView[] {
-  const collected: Collecting[] = [];
-  for (const entry of session.transcript) {
-    if (entry.type === "message") {
-      const message = session.messages.get(entry.messageId);
-      if (message === undefined) continue;
-      if (message.role === "user") {
-        collected.push({ userMessageId: message.messageId, entries: [] });
-        continue;
+/** Groups one mounted Session's transcript, retaining completed rows across live appends. */
+export class TurnGroups {
+  private layout?: SessionWorkspaceState["turnLayout"];
+  private running = false;
+  private rows: readonly TurnView[] = [];
+  private lastStart = 0;
+
+  /** Rebuilds the tail on structural changes and the full transcript on replay or an earlier correction. */
+  update(session: SessionWorkspaceState): readonly TurnView[] {
+    if (session.turnLayout === this.layout && session.running === this.running) return this.rows;
+    const keepHistory = this.layout?.history === session.turnLayout.history && this.rows.length > 0;
+    const prefix = keepHistory ? this.rows.length - 1 : 0;
+    const start = keepHistory ? this.lastStart : 0;
+    const collected: Collecting[] = [];
+    this.lastStart = start;
+    for (let i = start; i < session.transcript.length; i++) {
+      const entry = session.transcript[i]!;
+      if (entry.type === "message") {
+        const message = session.messages.get(entry.messageId);
+        if (!message) continue;
+        if (message.role === "user" && !message.continuesTurn) {
+          this.lastStart = i;
+          collected.push({ userMessageId: message.messageId, entries: [] });
+          continue;
+        }
       }
-      if (collected.length === 0) collected.push({ entries: [] });
-      collected.at(-1)!.entries.push({ type: "message", id: message.messageId });
-    } else {
-      if (collected.length === 0) collected.push({ entries: [] });
-      collected.at(-1)!.entries.push({ type: "tool", id: entry.toolCallId });
+      if (!collected.length) collected.push({ entries: [] });
+      collected.at(-1)!.entries.push(entry.type === "message"
+        ? { type: "message", id: entry.messageId } : { type: "tool", id: entry.toolCallId });
     }
+    const tail = collected.map((turn, i) => {
+      const next = foldTurn(session, turn, prefix + i, i + 1 === collected.length);
+      const previous = this.rows[prefix + i];
+      return previous && previous.key === next.key && sameTurn(previous, next) ? previous : next;
+    });
+    if (prefix + tail.length !== this.rows.length || tail.some((row, i) => row !== this.rows[prefix + i])) {
+      this.rows = prefix ? [...this.rows.slice(0, prefix), ...tail] : tail;
+    }
+    this.layout = session.turnLayout;
+    this.running = session.running;
+    return this.rows;
   }
-  const previousByKey = new Map(previous.map((turn) => [turn.key, turn]));
-  const turns = collected.map((turn, index) => {
-    const next = foldTurn(session, turn, index, index === collected.length - 1);
-    const kept = previousByKey.get(next.key);
-    return kept !== undefined && sameTurn(kept, next) ? kept : next;
-  });
-  return turns.length === previous.length && turns.every((turn, index) => turn === previous[index]) ? previous : turns;
 }
 
 /** One collected turn as the transcript shows it; only the newest turn can still be running. */
 function foldTurn(session: SessionWorkspaceState, turn: Collecting, index: number, newest: boolean): TurnView {
   const running = session.running && newest;
-  let lastMessage: MessageId | undefined;
-  for (const item of turn.entries) if (item.type === "message") lastMessage = item.id;
-  const answerMessageId = running ? undefined : lastMessage;
-  const steps: WorkStep[] = [];
-  // The open tool group, built in place: copying it per call would be quadratic in its length.
-  let group: { key: string; toolCallIds: ToolCallId[]; activities: ToolActivity[] } | undefined;
+  // A skip written as the run closes must not reclassify the final assistant reply as commentary.
+  const tail = turn.entries.findLast((item) => item.type === "tool" || !session.messages.get(item.id)?.decisions);
+  const sections: TurnSection[] = [];
+  const first = turn.entries[0];
+  const key = turn.userMessageId ?? (first === undefined ? `turn-${index}` : `${first.type}:${first.id}`);
+  let workKey = `work:${key}`;
+  let steps: WorkStep[] = [];
+  /** Flushes one contiguous stretch of work before a visible answer or decision. */
+  const flushWork = () => {
+    if (steps.length) sections.push({ type: "work", key: workKey, steps });
+    steps = [];
+  };
   const changes = new Map<string, { added: number; removed: number }>();
   for (const item of turn.entries) {
     if (item.type === "message") {
-      group = undefined;
-      if (item.id !== answerMessageId) steps.push({ type: "message", key: item.id, messageId: item.id });
+      const message = session.messages.get(item.id);
+      if (message?.decisions) {
+        flushWork();
+        sections.push({ type: "decision", key: `decision:${item.id}`, messageId: item.id });
+        workKey = `work:${item.id}`;
+        continue;
+      }
+      if (message?.reasoning) steps.push({ type: "thought", key: `thought:${item.id}`, messageId: item.id });
+      if (message?.text || message?.attachments?.length) {
+        if (item === tail) {
+          flushWork();
+          sections.push({ type: "answer", key: `answer:${item.id}`, messageId: item.id });
+        } else steps.push({ type: "message", key: `message:${item.id}`, messageId: item.id });
+      }
       continue;
     }
     const tool = session.tools.get(item.id);
-    const activity = toolActivity(tool?.kind);
-    if (group === undefined) {
-      group = { key: `tools:${item.id}`, toolCallIds: [], activities: [] };
-      steps.push({ type: "tools", ...group });
-    }
-    group.toolCallIds.push(item.id);
-    if (!group.activities.includes(activity)) group.activities.push(activity);
+    steps.push({ type: "tool", key: `tool:${item.id}`, toolCallId: item.id });
     for (const change of tool?.changes ?? []) {
       const merged = changes.get(change.path) ?? { added: 0, removed: 0 };
       changes.set(change.path, { added: merged.added + change.added, removed: merged.removed + change.removed });
     }
   }
-  const first = turn.entries[0];
-  const firstKey = first === undefined ? `turn-${index}` : `${first.type}:${first.id}`;
+  flushWork();
   return {
-    key: turn.userMessageId ?? firstKey,
+    key,
     ...(turn.userMessageId === undefined ? {} : { userMessageId: turn.userMessageId }),
-    steps,
-    ...(answerMessageId === undefined ? {} : { answerMessageId }),
+    sections,
     changes: [...changes].map(([path, counts]) => ({ path, ...counts })),
     running,
     ...(running ? {} : durationOf(session, turn)),
   };
 }
 
-/** How long an ended turn took: its last entry's end minus its user message's start. */
+/** Measures a finished turn from its user message to the latest timestamp in its entries. */
 function durationOf(session: SessionWorkspaceState, turn: Collecting): Readonly<{ durationMs?: number }> {
-  const start = turn.userMessageId === undefined ? undefined : Number(session.messages.get(turn.userMessageId)?.startedAtMs);
-  const ends = turn.entries.map((item) =>
-    Number(item.type === "message" ? session.messages.get(item.id)?.endedAtMs : session.tools.get(item.id)?.endedAtMs),
-  ).filter((value) => Number.isFinite(value));
-  if (start === undefined || !Number.isFinite(start) || ends.length === 0) return {};
-  return { durationMs: Math.max(...ends) - start };
+  if (turn.userMessageId === undefined) return {};
+  const start = Number(session.messages.get(turn.userMessageId)?.startedAtMs);
+  if (!Number.isFinite(start)) return {};
+  let end = -Infinity;
+  for (const entry of turn.entries) {
+    const entity = entry.type === "message" ? session.messages.get(entry.id) : session.tools.get(entry.id);
+    const time = Number(entity?.endedAtMs);
+    if (Number.isFinite(time) && time > end) end = time;
+  }
+  return Number.isFinite(end) ? { durationMs: end - start } : {};
 }
 
 /** Whether two folds of one turn show the same thing. */
 function sameTurn(left: TurnView, right: TurnView): boolean {
   return left.userMessageId === right.userMessageId
-    && left.answerMessageId === right.answerMessageId
     && left.running === right.running
     && left.durationMs === right.durationMs
-    && sameItems(left.steps, right.steps, (a, b) => a.key === b.key && (a.type === "message" || (b.type === "tools"
-      && sameItems(a.toolCallIds, b.toolCallIds, (x, y) => x === y) && sameItems(a.activities, b.activities, (x, y) => x === y))))
+    && sameItems(left.sections, right.sections, (a, b) => a.key === b.key &&
+      (a.type !== "work" || (b.type === "work" && sameItems(a.steps, b.steps, (x, y) => x.key === y.key))))
     && sameItems(left.changes, right.changes, (a, b) => a.path === b.path && a.added === b.added && a.removed === b.removed);
 }
 

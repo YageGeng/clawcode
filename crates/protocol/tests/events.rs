@@ -275,6 +275,6 @@ fn queue_changed_serializes_pending_lanes() {
     };
     assert_eq!(
         serde_json::to_value(payload).unwrap(),
-        serde_json::json!({"event":"queue_changed", "pending":{"steering":[],"followUp":[]}})
+        serde_json::json!({"event":"queue_changed", "pending":{"steering":[],"followUp":[],"reservedQuestions":[]}})
     );
 }

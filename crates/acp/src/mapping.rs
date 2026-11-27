@@ -183,12 +183,6 @@ impl<'a> AcpEventMapper<'a> {
                         ..
                     } => {
                         let plan = PlanUpdateOf(details.as_ref());
-                        if plan.is_todo_list() {
-                            return Ok(plan
-                                .update(&metadata)
-                                .into_iter()
-                                .collect());
-                        }
                         let status = wire::ToolCallStatus::from(ToolStatusOf {
                             cancelled: *cancelled,
                             is_error: *is_error,
@@ -221,7 +215,7 @@ impl<'a> AcpEventMapper<'a> {
                                 .raw_output(serde_json::to_value(message)?)
                                 .meta(metadata.clone()),
                             )];
-                        // An approved plan follows the result that approved it.
+                        // Each plan snapshot follows the tool result that produced it.
                         updates.extend(plan.update(&metadata));
                         updates
                     }
@@ -429,11 +423,6 @@ impl<'a> AcpEventMapper<'a> {
                     ),
                     None => Vec::new(),
                 }
-            }
-            AgentEventPayload::ToolExecutionEnd { result, .. }
-                if PlanUpdateOf(result.details.as_ref()).is_todo_list() =>
-            {
-                Vec::new()
             }
             AgentEventPayload::ToolExecutionEnd { result, .. } => {
                 let content = Self::tool_result_content(

@@ -7,7 +7,7 @@ use protocol::{
 };
 use serde::Serialize;
 use serde::de::DeserializeOwned;
-use store::{EntryKind, SessionEntry};
+use store::SessionEntry;
 
 use crate::runtime::{Kernel, KernelError, Session};
 
@@ -28,18 +28,17 @@ pub(in crate::runtime) trait ClawcodeEntry:
         }))
     }
 
+    /// Identifies this application's typed custom envelope without decoding its payload.
+    fn matches_entry(entry: &SessionEntry) -> bool {
+        entry.is_custom(ProductIdentity::SLUG, Self::CUSTOM_TYPE)
+    }
+
     /// Reads the value an entry records. Other entries are not this value; a
     /// clawcode entry this version cannot read, such as one a later version
     /// wrote, is skipped with a warning instead of making the Session
     /// unopenable.
     fn from_entry(entry: &SessionEntry) -> Option<Self> {
-        let field = |name: &str| {
-            entry.payload.get(name).and_then(serde_json::Value::as_str)
-        };
-        if entry.kind != EntryKind::Custom
-            || field("extensionId") != Some(ProductIdentity::SLUG)
-            || field("customType") != Some(Self::CUSTOM_TYPE)
-        {
+        if !Self::matches_entry(entry) {
             return None;
         }
         let data = entry.payload.get("data").cloned().unwrap_or_default();

@@ -66,16 +66,19 @@ impl Kernel {
                 if !input_processed {
                     session.ensure_queueable(&input)?;
                 }
-                let expanded = match input {
-                    protocol::RunInput::Text(text) => {
-                        session.expand_prompt_input(session_id, &text)?
-                    }
+                // Capture the identities directly from typed input alongside its expanded body.
+                let (expanded, keys) = match input {
+                    protocol::RunInput::Text(text) => (
+                        session.expand_prompt_input(session_id, &text)?,
+                        Vec::new(),
+                    ),
                     protocol::RunInput::Blocks(blocks) => {
-                        PromptInputExpansion::from_blocks(blocks)
+                        (PromptInputExpansion::from_blocks(blocks), Vec::new())
                     }
-                    protocol::RunInput::QuestionReply(reply) => {
-                        PromptInputExpansion::from_question_reply(&reply)?
-                    }
+                    protocol::RunInput::QuestionReply(reply) => (
+                        PromptInputExpansion::from_question_reply(&reply)?,
+                        reply.keys().collect(),
+                    ),
                     // Agent mail travels only through the mailbox lane.
                     protocol::RunInput::Mail(_) => {
                         return Err(KernelError::Protocol(
@@ -135,14 +138,19 @@ impl Kernel {
                         content,
                     })
                     .build();
-                let mut item = PendingQueueItem::new(
-                    queued.clone(),
-                    EntryId::try_from(self.id_generator.next(IdKind::Entry))
+                let item = PendingQueueItem::builder()
+                    .queued(queued.clone())
+                    .question_keys(keys)
+                    .entry_id(
+                        EntryId::try_from(
+                            self.id_generator.next(IdKind::Entry),
+                        )
                         .map_err(|error| {
                             KernelError::Protocol(error.to_string())
                         })?,
-                );
-                item.waiter = waiter;
+                    )
+                    .waiter(waiter)
+                    .build();
                 let record_id =
                     RecordId::try_from(self.id_generator.next(IdKind::Record))
                         .map_err(|error| {
@@ -205,6 +213,15 @@ impl Kernel {
     ) -> Result<PendingMessages, KernelError> {
         let session = self.session(session_id)?;
         session.execution.pending_snapshot()
+    }
+
+    /// Reads only the occupied question identities, without copying queued messages or attachments.
+    pub fn reserved_questions(
+        &self,
+        session_id: &SessionId,
+    ) -> Result<std::collections::BTreeSet<protocol::QuestionKey>, KernelError>
+    {
+        self.session(session_id)?.execution.settled_question_keys()
     }
 
     /// Cancels one queued message durably before removing its in-memory view.
@@ -329,7 +346,7 @@ impl Kernel {
     }
 
     /// Registers snapshot delivery so shutdown can wait for the final queue view.
-    pub(in crate::runtime::run) fn publish_queue_changed(
+    pub(in crate::runtime) fn publish_queue_changed(
         &self,
         session_id: &SessionId,
     ) {

@@ -424,6 +424,11 @@ impl SessionStore for FailingCompactionStore {
         self.inner.last_sequence()
     }
 
+    /// Preserves the wrapped store's boundary between copied and local entries.
+    fn first_local_sequence(&self) -> Option<u64> {
+        self.inner.first_local_sequence()
+    }
+
     /// Delegates session-name persistence.
     fn set_name(&mut self, name: Option<String>) -> Result<(), StoreError> {
         self.inner.set_name(name)

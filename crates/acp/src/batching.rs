@@ -9,6 +9,7 @@ use agent_client_protocol::{
 use futures::channel::mpsc;
 use futures::{FutureExt as _, StreamExt as _};
 use protocol::ProductIdentity;
+use serde_json::{Map, Value};
 
 use crate::coalescing::coalesce_updates;
 
@@ -16,6 +17,78 @@ use crate::coalescing::coalesce_updates;
 const BATCH_KEY: &str = "sessionUpdateBatch";
 /// Carrier format version this adapter understands and emits.
 const BATCH_VERSION: u64 = 1;
+/// Keep aggregate updates small for interactive clients and well below the remote frame limit.
+/// A larger individual update travels intact as a single notification.
+const MAX_BATCH_BYTES: usize = 1024 * 1024;
+/// Covers JSON-RPC framing, commas and the product metadata that wraps a packed array.
+const BATCH_ENVELOPE_BYTES: usize = 128;
+
+/// Bounds compact JSON size without visiting the bytes of text or image data.
+struct EncodedSize(usize);
+
+impl EncodedSize {
+    /// Includes one array separator and returns an over-limit sentinel for a standalone update.
+    fn of_update(message: &RawJsonRpcMessage) -> usize {
+        let RawJsonRpcMessage::Notification(notification) = message else {
+            unreachable!("only Session notifications are measured");
+        };
+        let Some(RawJsonRpcParams::Object(params)) = &notification.params
+        else {
+            unreachable!("Session updates have named parameters");
+        };
+        let mut size = Self(1);
+        match size.object(params, 0) {
+            Some(()) => size.0,
+            None => MAX_BATCH_BYTES + 1,
+        }
+    }
+
+    /// Stops visiting the JSON tree as soon as a carrier cannot fit this update.
+    fn add(&mut self, bytes: usize) -> Option<()> {
+        self.0 = self.0.saturating_add(bytes);
+        (self.0 <= MAX_BATCH_BYTES).then_some(())
+    }
+
+    /// Charges braces and each member's quoted key, colon, separator and value.
+    fn object(
+        &mut self,
+        object: &Map<String, Value>,
+        depth: usize,
+    ) -> Option<()> {
+        self.add(2)?;
+        for (key, value) in object {
+            self.add(4)?;
+            self.add(key.len().saturating_mul(6))?;
+            self.value(value, depth + 1)?;
+        }
+        Some(())
+    }
+
+    /// Bounds string escaping by six bytes per input byte and limits recursive inspection.
+    fn value(&mut self, value: &Value, depth: usize) -> Option<()> {
+        // Forward deeply nested extension metadata individually without growing the relay stack.
+        if depth >= 128 {
+            return None;
+        }
+        match value {
+            Value::Object(object) => self.object(object, depth),
+            Value::Array(items) => {
+                self.add(2 + items.len())?;
+                for item in items {
+                    self.value(item, depth + 1)?;
+                }
+                Some(())
+            }
+            Value::String(text) => {
+                self.add(2)?;
+                self.add(text.len().saturating_mul(6))
+            }
+            // Compact JSON needs at most 32 bytes for any i64, u64 or finite f64.
+            Value::Number(_) => self.add(32),
+            Value::Null | Value::Bool(_) => self.add(5),
+        }
+    }
+}
 
 /// ACP component wrapper that batches queued outbound Session notifications.
 pub(crate) struct BatchComponent<C> {
@@ -142,10 +215,10 @@ impl OutboundRelay {
     ) -> Result<(), agent_client_protocol::Error> {
         let mut pending = None;
         loop {
-            let frame = match pending.take() {
-                Some(frame) => frame,
+            let (frame, mut batch_bytes) = match pending.take() {
+                Some(pending) => pending,
                 None => match source.next().await {
-                    Some(frame) => frame,
+                    Some(frame) => (frame, None),
                     None => return Ok(()),
                 },
             };
@@ -176,10 +249,26 @@ impl OutboundRelay {
                         if session_update_id(&message)
                             == Some(session_id.as_str()) =>
                     {
+                        // A live singleton needs no estimate. Carry a measured neighbor into the next drain.
+                        let used = batch_bytes.get_or_insert_with(|| {
+                            EncodedSize::of_update(
+                                messages.first().expect("one queued update"),
+                            )
+                        });
+                        let next = EncodedSize::of_update(&message);
+                        if BATCH_ENVELOPE_BYTES + *used + next > MAX_BATCH_BYTES
+                        {
+                            pending = Some((
+                                TransportFrame::Single(message),
+                                Some(next),
+                            ));
+                            break;
+                        }
+                        *used += next;
                         messages.push(message);
                     }
                     Some(Some(frame)) => {
-                        pending = Some(frame);
+                        pending = Some((frame, None));
                         break;
                     }
                     Some(None) => {
@@ -755,6 +844,82 @@ mod tests {
         assert_eq!(tool_ids(&frames[1]), ["tool-3", "tool-4"]);
         assert_eq!(tool_ids(&frames[2]), ["tool-5"]);
         assert!(batch(&frames[2]).is_none());
+    }
+
+    /// Individually valid image updates keep their bytes and order across carrier boundaries.
+    #[tokio::test]
+    async fn image_replay_keeps_large_updates_in_separate_frames() {
+        let data = "A".repeat(700 * 1024);
+        let images = (1..=4).map(|index| TransportFrame::Single(
+            RawJsonRpcMessage::notification("session/update".to_string(), serde_json::json!({
+                "sessionId": "s1",
+                "update": { "sessionUpdate": "user_message", "messageId": index.to_string(),
+                            "content": [{ "type": "image", "mimeType": "image/png", "data": &data }] }
+            })).expect("image update")
+        ));
+        let frames = relay(images.collect(), 128, true).await;
+        assert_eq!(frames.len(), 4);
+        for (index, frame) in frames.iter().enumerate() {
+            let update = &params(frame)["update"];
+            assert_eq!(update["messageId"], (index + 1).to_string());
+            assert_eq!(update["content"][0]["data"], data);
+            assert!(batch(frame).is_none());
+        }
+    }
+
+    /// Keys and values with equal byte lengths use one bound regardless of their contents.
+    #[test]
+    fn size_bound_uses_byte_lengths_for_uninspected_strings() {
+        let [plain, escaped] = ["A", "\0"].map(|character| {
+            let frame = update_with_meta(
+                "s1",
+                1,
+                Some(serde_json::json!({
+                    (character.repeat(2048)): character.repeat(32 * 1024),
+                })),
+            );
+            let TransportFrame::Single(message) = frame else {
+                panic!("expected an update");
+            };
+            let estimate = super::EncodedSize::of_update(&message);
+            let wire = serde_json::to_vec(&message).expect("encoded update");
+            assert!(wire.len() <= super::BATCH_ENVELOPE_BYTES + estimate);
+            estimate
+        });
+        assert_eq!(plain, escaped);
+    }
+
+    /// Escaped strings respect the wire cap and an oversized singleton stays between its neighbors.
+    #[tokio::test]
+    async fn escaped_updates_preserve_carrier_limit_and_singleton_order() {
+        let frames = relay(
+            [0, 100_000, 100_000, 200_000, 0, 0]
+                .into_iter()
+                .enumerate()
+                .map(|(index, bytes)| {
+                    update_with_meta(
+                        "s1",
+                        index,
+                        Some(serde_json::json!({"text": "\0".repeat(bytes)})),
+                    )
+                })
+                .collect(),
+            128,
+            true,
+        )
+        .await;
+        assert_eq!(frames.len(), 4);
+        assert_eq!(tool_ids(&frames[0]), ["tool-0", "tool-1"]);
+        assert_eq!(tool_ids(&frames[1]), ["tool-2"]);
+        assert_eq!(tool_ids(&frames[2]), ["tool-3"]);
+        assert_eq!(tool_ids(&frames[3]), ["tool-4", "tool-5"]);
+        for (index, frame) in frames.iter().enumerate() {
+            let TransportFrame::Single(message) = frame else {
+                panic!("expected an update");
+            };
+            let wire = serde_json::to_vec(message).expect("encoded frame");
+            assert_eq!(wire.len() > super::MAX_BATCH_BYTES, index == 2);
+        }
     }
 
     /// A batch limit of one never forms a carrier.

@@ -5,10 +5,88 @@ use protocol::{
     ModelSelectEvent, ModelSelectSource, SessionId, SessionMode,
     SessionSettings, ThinkingLevel, ThinkingLevelSelectEvent, TurnId,
 };
-use store::{EntryKind, NewEntry, SessionEntry};
+use store::{
+    EntryKind, NewEntry, RecordKind, SessionEntry, SessionRecord, SessionStore,
+};
 
 use crate::runtime::plan::ModeChange;
+use crate::runtime::session::ClawcodeEntry;
 use crate::runtime::{Kernel, KernelError, Session};
+
+/// A v4 policy choice has an owner only in the Session where it was made.
+#[derive(serde::Deserialize, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub(super) struct FileApprovalChoice {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    session_id: Option<SessionId>,
+    mode: protocol::FileApprovalMode,
+}
+
+impl ClawcodeEntry for FileApprovalChoice {
+    const CUSTOM_TYPE: &'static str = protocol::FileApprovalMode::CUSTOM_TYPE;
+}
+
+impl FileApprovalChoice {
+    /// Restores the most recent choice made in this Session, including changes on abandoned branches.
+    pub(super) fn restore(
+        store: &dyn SessionStore,
+        records: &[SessionRecord],
+    ) -> Result<protocol::FileApprovalMode, KernelError> {
+        // Preview versions can still write their original records after opening a newer log.
+        let legacy = records
+            .iter()
+            .rev()
+            .find(|record| record.kind == RecordKind::LegacyFileApprovalMode);
+        let entry = store.latest_entry(&|entry| {
+            legacy.is_none_or(|record| record.sequence < entry.sequence)
+                && Self::matches_entry(entry)
+                && entry
+                    .payload
+                    .get("data")
+                    .and_then(|data| data.get("sessionId"))
+                    .and_then(serde_json::Value::as_str)
+                    == Some(store.session_id().as_str())
+        });
+        let (id, mode) = if let Some(entry) = &entry {
+            (
+                entry.id.as_str(),
+                entry.payload.get("data").and_then(|data| data.get("mode")),
+            )
+        } else if let Some(record) = legacy {
+            (record.id.as_str(), record.payload.get("mode"))
+        } else {
+            return Ok(protocol::FileApprovalMode::default());
+        };
+        // Refuse an unreadable policy instead of silently reactivating a previous grant.
+        let mode = serde_json::from_value(mode.cloned().unwrap_or_default())
+            .map_err(|error| {
+                tracing::warn!(
+                    "invalid file approval setting {} for Session {}: {}",
+                    id,
+                    store.session_id(),
+                    error
+                );
+                KernelError::from(error)
+            })?;
+        // Before forks detached copied grants, a reused ancestor ID could
+        // match an inherited entry. Only a provably local choice may grant
+        // access; preview records were never copied, and Ask remains safe.
+        if mode == protocol::FileApprovalMode::Allow
+            && let Some(entry) = entry
+            && store
+                .first_local_sequence()
+                .is_none_or(|start| start > entry.sequence.get())
+        {
+            tracing::warn!(
+                "using host file approval for Session {} because entry {} may belong to an ancestor",
+                store.session_id(),
+                entry.id
+            );
+            return Ok(protocol::FileApprovalMode::Host);
+        }
+        Ok(mode)
+    }
+}
 
 /// Borrows one live Session for persisted model or thinking changes.
 ///
@@ -152,6 +230,37 @@ impl SessionSettingsUpdate<'_> {
         Ok(mode)
     }
 
+    /// Persists the Session-wide policy before subsequent file mutations can observe it.
+    async fn file_approval(
+        &self,
+        mode: protocol::FileApprovalMode,
+    ) -> Result<(), KernelError> {
+        let _serial = self.session.settings_changes.lock().await;
+        if *self.session.file_approvals.mode.lock()? == mode {
+            return Ok(());
+        }
+        let change = FileApprovalChoice {
+            session_id: Some(self.session_id.clone()),
+            mode,
+        };
+        let id =
+            EntryId::try_from(self.kernel.id_generator.next(IdKind::Entry))
+                .map_err(|error| KernelError::Protocol(error.to_string()))?;
+        self.session.transcript.commit_setting(NewEntry {
+            id,
+            kind: EntryKind::Custom,
+            payload: change.payload()?,
+        })?;
+        *self.session.file_approvals.mode.lock()? = mode;
+        tracing::info!(
+            "changed external file approval for Session {} to {:?}",
+            self.session_id,
+            mode
+        );
+        self.publish().await;
+        Ok(())
+    }
+
     /// Returns the invoking Turn, or a fresh identity for a client request.
     fn turn_id(&self) -> Result<TurnId, KernelError> {
         match self.turn_id.cloned().or_else(|| {
@@ -225,12 +334,13 @@ impl Session {
         &self,
     ) -> Result<SessionSettings, KernelError> {
         let (model, thinking_level) = self.model.snapshot()?;
-        Ok(SessionSettings {
-            model: model.profile().clone(),
-            thinking_level,
-            models: self.model.profiles(),
-            mode: self.plan.mode()?,
-        })
+        Ok(SessionSettings::builder()
+            .model(model.profile().clone())
+            .thinking_level(thinking_level)
+            .models(self.model.profiles())
+            .mode(self.plan.mode()?)
+            .file_approval(*self.file_approvals.mode.lock()?)
+            .build())
     }
 }
 
@@ -238,12 +348,27 @@ impl Kernel {
     /// The model, thinking level, and mode a new Session starts with, and
     /// the models it may pick, as a client drafting one shows them.
     pub fn default_session_settings(&self) -> SessionSettings {
-        SessionSettings {
-            model: self.login_catalog.active().profile().clone(),
-            thinking_level: ThinkingLevel::default(),
-            models: self.login_catalog.profiles(),
-            mode: SessionMode::default(),
-        }
+        SessionSettings::builder()
+            .model(self.login_catalog.active().profile().clone())
+            .thinking_level(ThinkingLevel::default())
+            .models(self.login_catalog.profiles())
+            .build()
+    }
+
+    /// Changes only the named Session's external file policy, independently of plan approvals.
+    pub async fn set_session_file_approval(
+        &self,
+        session_id: &SessionId,
+        mode: protocol::FileApprovalMode,
+    ) -> Result<(), KernelError> {
+        let session = self.session(session_id)?;
+        SessionSettingsUpdate::builder()
+            .kernel(self)
+            .session_id(session_id)
+            .session(&session)
+            .build()
+            .file_approval(mode)
+            .await
     }
 
     /// Returns a Session's model, thinking level, and selectable models.

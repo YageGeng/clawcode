@@ -7,7 +7,6 @@ import { Spinner } from "../ui/feedback";
 import { Icon } from "../ui/icon";
 import { ListItem } from "../ui/list";
 import { StatusDot } from "../ui/surface";
-import { type } from "../ui/tokens";
 import { groupByWorkspace, recentSessions } from "./workspaces";
 import { motionClass } from "../ui/motion";
 
@@ -37,7 +36,7 @@ export function sidebarRows(sessions: readonly SessionSummary[], expanded: Reado
 export type RowContext = Readonly<{
   selected: (sessionId: SessionId) => boolean;
   running: (sessionId: SessionId) => boolean;
-  needsAttention: (sessionId: SessionId) => boolean;
+  attentionLabel: (sessionId: SessionId) => string | undefined;
   openSession: (sessionId: SessionId) => void;
   toggleWorkspace: (cwd: string) => void;
 }>;
@@ -49,7 +48,7 @@ export function SidebarRowView(props: { row: SidebarRow; context: RowContext }) 
   return (
     <View>
       <If when={props.row.kind === "heading" ? props.row.label : undefined}>
-        {(label) => <Text class={`px-2.5 pt-4 pb-1 ${type.meta} text-muted-foreground`}>{label()}</Text>}
+        {(label) => <Text class="px-2.5 pt-4 pb-1 text-[11px] leading-[16px] font-semibold uppercase tracking-wider text-muted-foreground">{label()}</Text>}
       </If>
       <If when={workspace()}>
         {(group) => (
@@ -76,14 +75,14 @@ export function SidebarRowView(props: { row: SidebarRow; context: RowContext }) 
                 // Waiting on the user wins over running (a request always comes mid-turn). `If` builds a marker
                 // only when it appears, so a streaming Session does not restart its spinner on every update.
                 <If
-                  when={props.context.needsAttention(item().sessionId)}
+                  when={props.context.attentionLabel(item().sessionId)}
                   else={
                     <If when={props.context.running(item().sessionId)}>
                       <Spinner label={t("session.running")} size="sm" />
                     </If>
                   }
                 >
-                  <StatusDot tone="info" label={t("session.needsAttention")} hideLabel />
+                  {(label) => <StatusDot tone="info" label={label()} hideLabel />}
                 </If>
               }
             />

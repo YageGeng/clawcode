@@ -54,13 +54,13 @@ type ButtonBaseProps = {
   onPress?: () => void;
 };
 
-/** The app's text button, with an optional leading icon. */
-export function Button(props: ButtonBaseProps & { label: string; icon?: IconName }) {
+/** The app's text button, with optional leading and trailing icons. */
+export function Button(props: ButtonBaseProps & { label: string; accessibilityLabel?: string; icon?: IconName; trailingIcon?: IconName }) {
   const variant = () => props.variant ?? "secondary";
   const size = () => props.size ?? "md";
   return (
     <BaseButton
-      accessibilityLabel={props.label}
+      accessibilityLabel={props.accessibilityLabel ?? props.label}
       disabled={props.disabled === true || props.loading === true}
       selected={props.selected === true}
       onPress={props.onPress}
@@ -72,7 +72,10 @@ export function Button(props: ButtonBaseProps & { label: string; icon?: IconName
       <If when={props.loading !== true && props.icon !== undefined}>
         <Icon name={props.icon ?? "plus"} size="sm" color={ink[variant()].icon} />
       </If>
-      <Text class={`${ink[variant()].text} ${textSize[size()]} font-medium`}>{props.label}</Text>
+      <Text class={`shrink truncate ${ink[variant()].text} ${textSize[size()]} font-medium`}>{props.label}</Text>
+      <If when={props.trailingIcon !== undefined}>
+        <Icon name={props.trailingIcon ?? "chevron-down"} size="sm" color={variant() === "ghost" || variant() === "outline" ? "muted-foreground" : ink[variant()].icon} />
+      </If>
     </BaseButton>
   );
 }

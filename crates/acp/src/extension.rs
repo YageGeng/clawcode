@@ -9,9 +9,9 @@ use kernel::Kernel;
 use protocol::{
     AcpCommandParameters, AcpCompactParameters, AcpExecTerminateParameters,
     AcpExtensionMethod, AcpForkParameters, AcpNavigateParameters,
-    AcpPendingMessageRemoveParameters, AcpQuestionDismissParameters,
-    AcpSessionParameters, AcpSkillParameters, AcpUserBashParameters,
-    CheckpointDiffParameters, CheckpointsParameters,
+    AcpPendingMessageRemoveParameters, AcpPendingMessagesParameters,
+    AcpQuestionDismissParameters, AcpSessionParameters, AcpSkillParameters,
+    AcpUserBashParameters, CheckpointDiffParameters, CheckpointsParameters,
     McpSessionRevisionNotification, ProductIdentity,
     TrajectoryContentParameters, TrajectoryParameters,
     WorkspaceChangesParameters, WorkspaceDiffParameters,
@@ -157,7 +157,7 @@ pub(crate) struct AcpExtensionDispatcher {
     pub mcp_watchers: Arc<Mutex<BTreeSet<protocol::SessionId>>>,
     pub projections: Arc<ProjectionRegistry>,
     pub session_watchers: crate::server::SessionWatchers,
-    pub elicitations: Arc<crate::elicitation::ElicitationBridge>,
+    pub server: AcpServer,
 }
 
 impl AcpExtensionDispatcher {
@@ -254,19 +254,15 @@ impl AcpExtensionDispatcher {
                 let live = self.projections.subscribe_live(&fork_id).map_err(
                     agent_client_protocol::Error::into_internal_error,
                 )?;
-                let server = AcpServer::new(
-                    Arc::clone(&self.kernel),
-                    Arc::clone(&self.projections),
-                    Arc::clone(&self.elicitations),
-                );
                 // A fork answers with its id; commands arrive as a notification.
-                server.send_available_commands(&fork_id, &self.connection)?;
-                server.watch_mcp(
+                self.server
+                    .send_available_commands(&fork_id, &self.connection)?;
+                self.server.watch_mcp(
                     &fork_id,
                     &self.connection,
                     Arc::clone(&self.mcp_watchers),
                 )?;
-                server.watch_projection(
+                self.server.watch_projection(
                     &fork_id,
                     &self.connection,
                     Arc::clone(&self.session_watchers),
@@ -304,15 +300,25 @@ impl AcpExtensionDispatcher {
                 projected
             }
             AcpExtensionMethod::PendingMessages => {
-                let input: AcpSessionParameters =
+                let input: AcpPendingMessagesParameters =
                     serde_json::from_value(request.parameters)
                         .map_err(invalid_parameters)?;
-                serde_json::to_value(
-                    self.kernel.pending_messages(&input.session_id).map_err(
+                if input.questions_only {
+                    let keys = self
+                        .kernel
+                        .reserved_questions(&input.session_id)
+                        .map_err(crate::server::KernelFailure)?;
+                    serde_json::json!({ "reservedQuestions": keys })
+                } else {
+                    serde_json::to_value(
+                        self.kernel
+                            .pending_messages(&input.session_id)
+                            .map_err(crate::server::KernelFailure)?,
+                    )
+                    .map_err(
                         agent_client_protocol::Error::into_internal_error,
-                    )?,
-                )
-                .map_err(agent_client_protocol::Error::into_internal_error)?
+                    )?
+                }
             }
             AcpExtensionMethod::PendingMessageRemove => {
                 let input: AcpPendingMessageRemoveParameters =
@@ -337,11 +343,17 @@ impl AcpExtensionDispatcher {
                 let input: AcpQuestionDismissParameters =
                     serde_json::from_value(request.parameters)
                         .map_err(invalid_parameters)?;
-                self.kernel
-                    .dismiss_questions(&input.session_id, input.items)
+                let skipped = self
+                    .kernel
+                    .dismiss_question_keys(&input.session_id, input.items)
                     .await
                     .map_err(crate::server::KernelFailure)?;
-                serde_json::json!({})
+                // A busy Run may still hold these skips. Its eventual message is the durable settlement.
+                let reserved = self
+                    .kernel
+                    .reserved_questions(&input.session_id)
+                    .map_err(crate::server::KernelFailure)?;
+                serde_json::json!({ "skipped": skipped, "reservedQuestions": reserved })
             }
             AcpExtensionMethod::ClearQueue => {
                 let input: AcpSessionParameters =

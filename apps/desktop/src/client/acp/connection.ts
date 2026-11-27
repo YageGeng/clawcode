@@ -104,7 +104,11 @@ export class AcpConnection {
   request<T>(
     method: string,
     params: unknown,
-    options: Readonly<{ timeoutMs?: number }> = {}
+    options: Readonly<{
+      timeoutMs?: number;
+      /** Applies a response snapshot in wire order, before the next notification in the same event-loop turn. */
+      onResult?: (result: T) => void;
+    }> = {}
   ): Promise<T> {
     return new Promise<T>((resolve, reject) => {
       try {
@@ -119,7 +123,14 @@ export class AcpConnection {
         reject(new Error(`ACP request ${method} timed out`));
       }, options.timeoutMs);
       this.pending.set(id, {
-        resolve: (value) => resolve(value as T),
+        resolve: (value) => {
+          try {
+            options.onResult?.(value as T);
+            resolve(value as T);
+          } catch (reason: unknown) {
+            reject(reason);
+          }
+        },
         reject,
         ...(timeout === undefined ? {} : { timeout })
       });

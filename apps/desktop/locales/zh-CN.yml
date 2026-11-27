@@ -22,6 +22,8 @@ host:
     unanswered: "后端没有响应：%{detail}"
     stopped: "后端已停止：%{detail}"
 notice:
+  replayFailed: "无法加载「%{session}」的当前分支"
+  reopenToRetry: 请重新选择该会话以加载历史记录。
   newSessionFailed: 无法创建会话
   promptFailed: 消息未发送
 shell:
@@ -39,25 +41,24 @@ shell:
 session:
   running: 运行中
   needsAttention: 等待你批准
+  awaitsAnswer: 等待你回答
   jumpToBottom: 回到底部
 empty:
   heading: 要在
   headingAfter: 里做什么？
   chooseFolder: 选择文件夹…
 turn:
+  skippedQuestion: 已跳过问题
+  thinking: 思考
+  message: 助手消息
+  proposedPlan: 计划内容
+  work: 工作记录
+  changedFiles: "文件改动（%{count}）"
   workedFor: 用时 %{duration}
   working: 正在工作
 time:
   seconds: "%{s} 秒"
   minutesSeconds: "%{m} 分 %{s} 秒"
-tools:
-  ran: 运行了命令
-  edited: 编辑了文件
-  read: 读取了文件
-  searched: 搜索了内容
-  fetched: 获取了网页
-  other: 使用了工具
-  separator: "、"
 changes:
   edited: 已编辑 %{file}
 composer:
@@ -65,8 +66,34 @@ composer:
   placeholder: 有问题，尽管问
   send: 发送
   stop: 停止
-  attach: 添加附件
-  attachSoon: 附件功能即将推出
+  attach: 添加图片
+  settings: 会话设置
+  modelLabel: 模型
+  thinkingLabel: 思考等级
+  modeLabel: 会话模式
+  updating: 正在更新会话设置
+  updateFailed: 无法更改会话设置，请重试。
+  noModelSettings: 此会话未提供模型或思考等级设置。
+  mode:
+    default: 默认
+    plan: 计划
+  thinking_level:
+    "off": 关闭
+    minimal: 最低
+    low: 低
+    medium: 中
+    high: 高
+    x_high: 极高
+attachments:
+  oneImage: 1 张图片
+  manyImages: "%{count} 张图片"
+  formats: 图片
+  remove: "移除 %{name}"
+  tooMany: 每条消息最多可附加 5 张图片。
+  tooLarge: 单张图片不能超过 10 MiB。
+  totalSize: 每条消息的图片总大小不能超过 20 MiB。
+  unsupported: 请选择非空的 PNG、JPEG、GIF 或 WebP 图片。
+  remoteSize: 消息超过远程连接的 32 MiB 限制，请缩短文字或移除图片。
 remote:
   title: 远程控制
   allowControl: 允许远程控制
@@ -124,3 +151,61 @@ remote:
     unavailable: 请检查对方电脑是否在线，并已允许远程控制。
     closed: 远程连接已关闭。
     self: 此配对码属于这台电脑，请使用另一台电脑的配对码。
+
+commands:
+  available: 可用命令
+  noMatches: 没有匹配的命令
+interactions:
+  plan: "计划"
+  approved: "已批准的计划"
+  tasks: "计划 · 已完成 %{done}/%{total} 项"
+  pending: "待开始"
+  active: "进行中"
+  completed: "已完成"
+  proposal: "批准此计划？"
+  approve: "批准并执行"
+  keepPlanning: "继续规划"
+  question: "第 %{current} 题，共 %{total} 题"
+  previous: "上一题"
+  next: "下一题"
+  choice: "选择回答"
+  other: "其他"
+  freeText: "你的回答"
+  skip: "跳过"
+  skipAll: "全部跳过"
+  send: "发送回答"
+  failed: "未能提交，请重试。"
+  closed: "这道题已被回答或跳过。"
+  offline: "主机已离线。"
+  emptyAnswer: "请输入回答。"
+fileApproval:
+  title: 文件审批
+  host: 沿用主机设置
+  hostHelp: 使用主机配置的文件审批策略。
+  ask: 逐次询问
+  askHelp: 内置写入和编辑工具修改工作区外文件前询问。
+  allow: 自动同意外部写入
+  allowHelp: 允许当前会话直接修改工作区外的文件。
+toolDetail:
+  input: 输入
+  result: 结果
+  rawResult: 原始结果
+  waiting: 正在等待结果…
+  noOutput: 无输出。
+  emptyValue: "（空）"
+  before: 修改前
+  after: 修改后
+  bytes: "%{count} 字节"
+  image: 图片
+  audio: 音频
+  resource: 资源
+  resource_link: 资源链接
+  terminal: "终端 %{id}"
+  exitCode: "退出码 %{code}"
+  signal: "信号 %{signal}"
+  status:
+    pending: 等待中
+    in_progress: 执行中
+    completed: 已完成
+    failed: 失败
+    cancelled: 已取消

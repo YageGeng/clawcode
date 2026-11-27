@@ -1,7 +1,9 @@
 use std::fmt;
 
 use agent_client_protocol::v2::schema as wire;
-use protocol::{ModelProfile, SessionMode, SessionSettings, ThinkingLevel};
+use protocol::{
+    FileApprovalMode, ModelProfile, SessionMode, SessionSettings, ThinkingLevel,
+};
 
 /// Config id of the model select.
 const MODEL: &str = "model";
@@ -9,6 +11,15 @@ const MODEL: &str = "model";
 const THINKING_LEVEL: &str = "thinking_level";
 /// Config id of the session-mode select.
 const MODE: &str = "mode";
+/// Config id of the external file permission select.
+const FILE_APPROVAL: &str = "file_approval";
+
+/// Stable ACP option ids and display labels in the order presented to clients.
+const FILE_APPROVAL_CHOICES: [(FileApprovalMode, &str, &str); 3] = [
+    (FileApprovalMode::Host, "host", "Host default"),
+    (FileApprovalMode::Ask, "ask", "Ask every time"),
+    (FileApprovalMode::Allow, "allow", "Allow external writes"),
+];
 
 /// Borrows one session mode for its wire value and display name.
 struct ModeValue(SessionMode);
@@ -130,6 +141,19 @@ impl From<ConfigOptionsOf<'_>> for Vec<wire::SessionConfigOption> {
                     .collect::<Vec<_>>(),
             )
             .category(wire::SessionConfigOptionCategory::Mode),
+            wire::SessionConfigOption::select(
+                FILE_APPROVAL,
+                "External file approvals",
+                FILE_APPROVAL_CHOICES
+                    .iter()
+                    .find(|(mode, _, _)| *mode == settings.file_approval)
+                    .map_or("host", |(_, id, _)| *id),
+                FILE_APPROVAL_CHOICES
+                    .map(|(_, id, name)| {
+                        wire::SessionConfigSelectOption::new(id, name)
+                    })
+                    .to_vec(),
+            ),
         ]
     }
 }
@@ -140,6 +164,7 @@ pub(crate) enum ConfigChange {
     Model { provider: String, model_id: String },
     ThinkingLevel(ThinkingLevel),
     Mode(SessionMode),
+    FileApproval(FileApprovalMode),
 }
 
 impl TryFrom<(&SessionSettings, &wire::SetSessionConfigOptionRequest)>
@@ -189,6 +214,15 @@ impl TryFrom<(&SessionSettings, &wire::SetSessionConfigOptionRequest)>
                 .map(Self::Mode)
                 .ok_or_else(|| {
                     invalid(format!("mode is not offered: {value}"))
+                }),
+            FILE_APPROVAL => FILE_APPROVAL_CHOICES
+                .iter()
+                .find(|(_, id, _)| *id == value)
+                .map(|(mode, _, _)| Self::FileApproval(*mode))
+                .ok_or_else(|| {
+                    invalid(format!(
+                        "unknown external file approval mode: {value}"
+                    ))
                 }),
             other => Err(invalid(format!("unknown config option: {other}"))),
         }

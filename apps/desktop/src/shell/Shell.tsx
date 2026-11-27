@@ -7,13 +7,12 @@ import type { RemotePage } from "../remote/RemoteDialogs";
 import { remoteError } from "../stores/remote";
 import type { RemoteStore } from "../stores/remote";
 import { Button } from "../ui/button";
-import { Composer } from "../composer/Composer";
-import { ContextStrip } from "../composer/ContextStrip";
 import { SessionView } from "../session/SessionView";
 import { SettingsDialog } from "../settings/SettingsDialog";
 import type { AppStore } from "../stores/app";
 import type { HostFailure, HostPhase } from "../stores/host";
 import type { SettingsStore } from "../stores/settings";
+import { configureDesktopFonts } from "../ui/fonts";
 import { glideNextLayout } from "../ui/motion";
 import { Toasts, ToastStore } from "../ui/toast";
 import { type } from "../ui/tokens";
@@ -24,6 +23,7 @@ import { groupByWorkspace } from "./workspaces";
 
 /** The window: title bar, sidebar and the main area (a Session, the empty state, or the host's state). */
 export function Shell(props: { store: AppStore; settings: SettingsStore; remote?: RemoteStore }) {
+  configureDesktopFonts();
   const sidebarOpen = signal(true);
   const settingsOpen = signal(false);
   // The working directory a new Session starts in; the newest workspace until the user picks one.
@@ -51,15 +51,6 @@ export function Shell(props: { store: AppStore; settings: SettingsStore; remote?
   const retry = () => props.remote?.connect(host().info);
   // The host's notices (a prompt that was not sent) show as toasts; each leaves the host once shown.
   const toasts = new ToastStore();
-  /** Keep a failed first prompt editable and explain workspace errors reported by the selected host. */
-  const startSession = async (text: string) => {
-    try {
-      await props.store.startSession(host().info.id, cwd() ?? "", text);
-    } catch (error: unknown) {
-      toasts.show({ title: t("notice.newSessionFailed"), description: messageOf(error), tone: "danger" });
-      throw error;
-    }
-  };
   effect(() => {
     for (const notice of host().notices()) {
       toasts.show({ title: notice.title, description: notice.description, tone: "danger" });
@@ -116,23 +107,15 @@ export function Shell(props: { store: AppStore; settings: SettingsStore; remote?
             <Text class={`${type.ui} text-muted-foreground px-6 py-2`}>{t("remote.status.reconnecting")}</Text>
           </If>
           <If when={["ready", "offline", "reconnecting"].includes(host().phase().kind)}>
+            {/* The navigation entry owns each blank draft. A host retry preserves it and New session replaces it. */}
             <If
               when={openSessionId()}
               else={
-                <EmptyState
-                  host={host()}
-                  cwd={cwd()}
-                  onCwdChange={(next) => chosenCwd.update((previous) => new Map(previous).set(host().info.id, next))}
-                  composer={
-                    <Composer
-                      host={host()}
-                      sessionId={null}
-                      disabled={cwd() === null || host().phase().kind !== "ready"}
-                      context={<ContextStrip store={props.store} onAddHost={addHost} />}
-                      onSend={startSession}
-                    />
-                  }
-                />
+                <Each of={[props.store.location()]}>
+                  {() => <EmptyState store={props.store} cwd={cwd()} onAddHost={addHost}
+                    onCwdChange={(next) => chosenCwd.update((previous) => new Map(previous).set(host().info.id, next))}
+                    onStartError={(error) => toasts.show({ title: t("notice.newSessionFailed"), description: messageOf(error), tone: "danger" })} />}
+                </Each>
               }
             >
               {/* Keyed by host and Session: `If` keeps its branch while it stays truthy, so without the key one view

@@ -57,7 +57,7 @@ export type SessionListResult = Readonly<{
   nextCursor?: string | null;
 }>;
 
-export type NewSessionResult = Readonly<{ sessionId: SessionId }>;
+export type NewSessionResult = Readonly<{ sessionId: SessionId; configOptions?: unknown; availableCommands?: unknown }>;
 
 export type SessionUpdateNotification = Readonly<{
   sessionId: SessionId;
@@ -74,6 +74,7 @@ export const AcpProtocol = {
     sessionResume: "session/resume",
     sessionPrompt: "session/prompt",
     sessionCancel: "session/cancel",
+    sessionSetConfigOption: "session/set_config_option",
     sessionUpdate: "session/update"
   },
   /** `value` as a plain JSON object, or `undefined` for anything else (arrays and null included). */
@@ -194,10 +195,18 @@ export const AcpProtocol = {
         })
       : [];
     if (typeof request?.sessionId !== "string" || typeof request.title !== "string" || options.length === 0) return undefined;
+    const subject = this.record(request.subject);
+    const tool = subject?.type === "tool_call" ? this.record(subject.toolCall) : undefined;
+    const plan = tool?.kind === "switch_mode" && Array.isArray(tool.content)
+      ? tool.content.flatMap((item: unknown) => {
+          const block = this.record(this.record(item)?.content);
+          return block?.type === "text" && typeof block.text === "string" ? [block.text] : [];
+        }).join("\n") : undefined;
     return {
       sessionId: request.sessionId as SessionId,
       title: request.title,
       ...(typeof request.description === "string" ? { description: request.description } : {}),
+      ...(plan ? { plan } : {}),
       options,
     };
   },

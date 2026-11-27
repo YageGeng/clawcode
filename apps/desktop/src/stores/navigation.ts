@@ -40,6 +40,13 @@ export class NavigationHistory {
     this.index = this.entries.length - 1;
   }
 
+  /** Gives an explicit New session its own draft identity, keeping consecutive blank pages in one history slot. */
+  beginDraft(): void {
+    const location = { hostId: this.current.hostId, sessionId: null };
+    if (this.current.sessionId === null) this.entries[this.index] = location;
+    else this.push(location);
+  }
+
   /** Steps back; the new current, or `undefined` at the start. */
   back(): AppLocation | undefined {
     if (!this.canGoBack) return undefined;

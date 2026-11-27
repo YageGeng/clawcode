@@ -1,11 +1,16 @@
+import { decodeCommands } from "../acp/commands";
 import { AcpProtocol } from "../acp/protocol";
+import { decodeSessionConfig } from "../acp/sessionConfig";
 import type { EventMeta, MessageId, SessionId, SessionUpdateNotification, TimestampMs } from "../acp/protocol";
-import type { EventOrder, MessageEntity, SessionNotice, ToolCallEntity, ToolKind } from "../domain/model";
+import type { EventOrder, MessageAttachment, MessageEntity, SessionNotice, ToolCallEntity, ToolKind } from "../domain/model";
 import { fileChanges } from "../turns";
+import { interactionUpdate, questionDecisions } from "./interactions";
 import type { SessionEntities, SessionWorkspaceAction } from "./sessionState";
 import type { WorkspaceAction } from "./state";
+import { decodeTerminal } from "./terminal";
 
 export type DecodedSessionUpdate =
+  | Readonly<{ scope: "branch"; refreshRuntime: false }>
   | Readonly<{ scope: "global"; actions: readonly WorkspaceAction[]; refreshRuntime: false }>
   | Readonly<{ scope: "session"; actions: readonly SessionWorkspaceAction[]; refreshRuntime: boolean }>;
 
@@ -24,14 +29,45 @@ const TOOL_KINDS: ReadonlySet<ToolKind> = new Set<ToolKind>(["read", "edit", "de
 function contentText(content: unknown): string {
   if (!Array.isArray(content)) return "";
   return content.map((block: unknown) => {
-    const text = AcpProtocol.record(block)?.text;
-    return typeof text === "string" ? text : "";
+    const record = AcpProtocol.record(block);
+    return (record?.type === "text" || record?.type === undefined) && typeof record?.text === "string" ? record.text : "";
   }).join("");
+}
+
+/** Reuses the raw result's binary strings when the kernel also sends them in native ACP content. */
+function shareMediaBytes(content: readonly unknown[] | undefined, rawOutput: unknown): readonly unknown[] | undefined {
+  if (!content?.length) return content;
+  const raw = AcpProtocol.record(rawOutput);
+  const blocks = raw?.blocks ?? AcpProtocol.record(raw?.content)?.blocks;
+  if (!Array.isArray(blocks)) return content;
+  const payloads = new Map<string, string>();
+  for (const item of blocks) {
+    const block = AcpProtocol.record(item);
+    const data = block?.type === "image" || block?.type === "audio" ? block.data
+      : block?.type === "embedded_resource" ? AcpProtocol.record(block.content)?.data : undefined;
+    if (typeof data === "string") payloads.set(data, data);
+  }
+  if (!payloads.size) return content;
+  // Match by bytes, since native content can include extra diff hunks or omit kernel-only blocks.
+  return content.map((item) => {
+    const entry = AcpProtocol.record(item);
+    const block = AcpProtocol.record(entry?.content);
+    if (block?.type === "image" || block?.type === "audio") {
+      const data = typeof block.data === "string" ? payloads.get(block.data) : undefined;
+      if (data !== undefined) return { ...entry, content: { ...block, data } };
+    }
+    if (block?.type === "resource") {
+      const resource = AcpProtocol.record(block.resource);
+      const blob = typeof resource?.blob === "string" ? payloads.get(resource.blob) : undefined;
+      if (blob !== undefined) return { ...entry, content: { ...block, resource: { ...resource, blob } } };
+    }
+    return item;
+  });
 }
 
 /**
  * Narrows ACP wire updates into typed workspace actions without owning UI state. Only what the
- * app shows is decoded: titles, notices, messages, tool calls and the run state; other updates
+ * app shows is decoded: titles, notices, settings, messages, tool calls and the run state; other updates
  * are ignored.
  */
 export class SessionUpdateDecoder {
@@ -46,6 +82,25 @@ export class SessionUpdateDecoder {
   decode(notification: SessionUpdateNotification, entities: SessionEntities, receivedOrder: number): DecodedSessionUpdate {
     const update = notification.update;
     const kind = update.sessionUpdate;
+    if (kind === `_${this.namespace}/event` && AcpProtocol.record(update.payload)?.event === "branch_navigated") {
+      return { scope: "branch", refreshRuntime: false };
+    }
+    if (kind === "available_commands_update") {
+      const commands = decodeCommands(update.availableCommands);
+      return {
+        scope: "global",
+        actions: commands === undefined ? [] : [{ type: "commands/replaced", sessionId: notification.sessionId, commands }],
+        refreshRuntime: false,
+      };
+    }
+    if (kind === "config_option_update") {
+      const options = decodeSessionConfig(update.configOptions);
+      return {
+        scope: "global",
+        actions: options === undefined ? [] : [{ type: "config/replaced", sessionId: notification.sessionId, options }],
+        refreshRuntime: false,
+      };
+    }
     if (kind === "session_info_update" && (typeof update.title === "string" || update.title === null)) {
       // A null title clears the name; lists show an untitled Session by its id.
       const title = update.title?.trim() || notification.sessionId;
@@ -77,11 +132,41 @@ export class SessionUpdateDecoder {
       order: { sequence: meta?.sequence ?? receivedOrder, receivedOrder },
       entities
     };
+    if (kind === `_${this.namespace}/event`) {
+      const event = AcpProtocol.record(update.payload);
+      if ((event?.event === "run_start" || event?.event === "run_end") && typeof event.run_id === "string") {
+        return { scope: "session", actions: [{ type: "run/boundary" }], refreshRuntime: false };
+      }
+      if (event?.event === "message_end") {
+        const record = AcpProtocol.record(event.message);
+        const decisions = questionDecisions(record, this.namespace);
+        const actions: SessionWorkspaceAction[] = [];
+        if (decisions?.length) {
+          actions.push({ type: "interactions/changed", change: { type: "settled", ids: decisions.map(({ id }) => id) } });
+          // Older persisted extension messages nest their identity; today's kernel flattens it.
+          const messageId = record?.message_id ?? AcpProtocol.record(record?.identity)?.message_id;
+          const extension = AcpProtocol.record(AcpProtocol.record(record?.content)?.extension);
+          if (meta && typeof messageId === "string" && extension?.display !== false) {
+            const timing = this.messageTiming(context.productMeta?.messageTiming);
+            actions.push({ type: "message/upserted", order: context.order, message: {
+              messageId: messageId as MessageId, role: "user", decisions, text: "", reasoning: "",
+              startedAtMs: timing?.startedAtMs ?? meta.timestampMs, endedAtMs: timing?.endedAtMs ?? meta.timestampMs,
+            } });
+          }
+        }
+        return { scope: "session", actions, refreshRuntime: false };
+      }
+    }
     const action = this.sessionAction(kind, context);
-    return { scope: "session", actions: action === undefined ? [] : [action], refreshRuntime: false };
+    const actions = action === undefined ? [] : [action];
+    if (kind === "tool_call_update" || kind === "plan_update" || kind === `_${this.namespace}/event`) {
+      const change = interactionUpdate(update, this.namespace);
+      if (change) actions.push({ type: "interactions/changed", change });
+    }
+    return { scope: "session", actions, refreshRuntime: false };
   }
 
-  /** The Session action of one message or tool update, if it is one the app shows. */
+  /** Projects messages, tools and the byte streams referenced by tool content. */
   private sessionAction(kind: unknown, context: UpdateContext): SessionWorkspaceAction | undefined {
     const { update, meta, productMeta, order } = context;
     switch (kind) {
@@ -90,15 +175,20 @@ export class SessionUpdateDecoder {
       case "agent_thought_chunk": {
         const content = AcpProtocol.record(update.content);
         const contentMeta = AcpProtocol.eventMeta(content?._meta, this.namespace) ?? meta;
-        if (typeof update.messageId !== "string" || typeof content?.text !== "string" || contentMeta === undefined) return undefined;
+        if (typeof update.messageId !== "string" || !content || contentMeta === undefined) return undefined;
         const messageId = update.messageId as MessageId;
+        if (typeof content.type === "string" && content.type !== "text") {
+          return kind === "agent_message_chunk"
+            ? { type: "message/attachment-appended", messageId, block: content, meta: contentMeta, order } : undefined;
+        }
+        if (typeof content.text !== "string") return undefined;
         return kind === "agent_thought_chunk"
           ? { type: "message/reasoning-delta", messageId, delta: content.text, meta: contentMeta, order }
           : { type: "message/text-delta", messageId, role: kind === "user_message_chunk" ? "user" : "assistant", delta: content.text, meta: contentMeta, order };
       }
       case "user_message":
-        // A `!bash` prompt is shown by its tool, and a replayed branch summary is not user input.
-        if (productMeta?.origin === "user_bash" || productMeta?.origin === "branch_summary") return undefined;
+        // The accepted shell prompt opens a turn; its separate tool entity owns output and exit state.
+        if (productMeta?.origin === "branch_summary") return undefined;
         return this.message(context, "user");
       case "agent_message":
         return this.message(context, "assistant");
@@ -106,6 +196,12 @@ export class SessionUpdateDecoder {
         return this.thought(context);
       case "tool_call_update":
         return this.tool(context);
+      case "terminal_update":
+      case "terminal_output_chunk": {
+        const previous = typeof update.terminalId === "string" ? context.entities.terminals.get(update.terminalId) : undefined;
+        const terminal = decodeTerminal(previous, update);
+        return terminal ? { type: "terminal/upserted", terminal } : undefined;
+      }
       default:
         return undefined;
     }
@@ -118,10 +214,32 @@ export class SessionUpdateDecoder {
     const messageId = update.messageId as MessageId;
     const existing = context.entities.messages.get(messageId);
     const timing = this.messageTiming(context.productMeta?.messageTiming);
+    let imageCount = existing?.imageCount;
+    let attachments = existing?.attachments;
+    let text = existing?.text ?? "";
+    if ("content" in update) {
+      const blocks: readonly unknown[] = Array.isArray(update.content) ? update.content : [];
+      text = "";
+      imageCount = 0;
+      const media: MessageAttachment[] = [];
+      for (const value of blocks) {
+        const block = AcpProtocol.record(value);
+        if (!block) continue;
+        if (block.type === "text" || block.type === undefined) {
+          if (typeof block.text === "string") text += block.text;
+        } else if (role === "assistant" && typeof block.type === "string") {
+          media.push({ textOffset: text.length, block });
+        } else if (block.type === "image") imageCount++;
+      }
+      attachments = media;
+    }
     const message: MessageEntity = {
       messageId,
       role,
-      text: "content" in update ? contentText(update.content) : existing?.text ?? "",
+      ...(context.productMeta?.origin === "user_bash" || existing?.origin === "user_bash" ? { origin: "user_bash" } : {}),
+      text,
+      ...(role === "user" && imageCount ? { imageCount } : {}),
+      ...(role === "assistant" && attachments?.length ? { attachments } : {}),
       reasoning: existing?.reasoning ?? "",
       startedAtMs: timing?.startedAtMs ?? existing?.startedAtMs ?? meta.timestampMs,
       endedAtMs: timing?.endedAtMs ?? meta.timestampMs
@@ -149,22 +267,35 @@ export class SessionUpdateDecoder {
     if (typeof update.toolCallId !== "string") return undefined;
     const toolCallId = update.toolCallId as ToolCallEntity["toolCallId"];
     const previous = context.entities.tools.get(toolCallId);
-    const status = update.status === "failed" || update.status === "completed" || update.status === "in_progress" || update.status === "cancelled"
-      ? update.status
-      : previous?.status ?? "pending";
-    const kind = typeof update.kind === "string" && TOOL_KINDS.has(update.kind as ToolKind) ? update.kind as ToolKind : previous?.kind;
+    let status = previous?.status ?? "pending";
+    if (update.status === null) status = "pending";
+    else if (update.status === "pending" || update.status === "failed" || update.status === "completed"
+      || update.status === "in_progress" || update.status === "cancelled") status = update.status;
+    let kind = previous?.kind;
+    if (update.kind === null) kind = "other";
+    else if (typeof update.kind === "string" && TOOL_KINDS.has(update.kind as ToolKind)) kind = update.kind as ToolKind;
+    const name = update.name === null ? undefined : typeof update.name === "string" ? update.name : previous?.name;
+    const rawInput = update.rawInput === undefined ? previous?.rawInput : update.rawInput ?? undefined;
+    const rawOutput = update.rawOutput === undefined ? previous?.rawOutput : update.rawOutput ?? undefined;
+    const contentPatch = Array.isArray(update.content) ? update.content : update.content === null ? [] : undefined;
+    const content = contentPatch !== undefined || rawOutput !== previous?.rawOutput
+      ? shareMediaBytes(contentPatch ?? previous?.content, rawOutput) : previous?.content;
     const subagentSessionId = this.subagentSessionId(update.rawOutput) ?? previous?.subagentSessionId;
     const ended = status === "completed" || status === "failed" || status === "cancelled";
     const tool: ToolCallEntity = {
       toolCallId,
-      title: typeof update.title === "string" ? update.title : previous?.title ?? update.toolCallId,
+      title: typeof update.title === "string" ? update.title : update.title === null ? update.toolCallId : previous?.title ?? update.toolCallId,
       status,
+      ...(name === undefined ? {} : { name }),
+      ...(rawInput === undefined ? {} : { rawInput }),
+      ...(rawOutput === undefined ? {} : { rawOutput }),
+      ...(content === undefined ? {} : { content }),
       ...(kind === undefined ? {} : { kind }),
       // A discovered child stays even when a later cancellation carries no details.
       ...(subagentSessionId === undefined ? {} : { subagentSessionId }),
-      // ACP v2 content follows the omitted / clear / replace rules; only its diffs are kept, as counts.
-      changes: !("content" in update) ? previous?.changes ?? [] : fileChanges(Array.isArray(update.content) ? update.content : []),
-      ...(ended && meta !== undefined ? { endedAtMs: meta.timestampMs } : {})
+      // A metadata-only patch leaves both the payload and its computed file counts intact.
+      changes: contentPatch === undefined ? previous?.changes ?? [] : fileChanges(contentPatch),
+      ...(ended ? { endedAtMs: previous?.endedAtMs ?? meta?.timestampMs } : {})
     };
     return { type: "tool/upserted", tool, order: context.order };
   }

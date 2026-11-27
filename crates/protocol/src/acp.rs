@@ -104,6 +104,17 @@ pub struct AcpQuestionDismissParameters {
     pub items: Vec<crate::QuestionKey>,
 }
 
+/// Parameters for a full pending queue or its compact question reservation snapshot.
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct AcpPendingMessagesParameters {
+    /// Session whose current reservations or queued messages are requested.
+    pub session_id: SessionId,
+    /// Omits queue message bodies when a client only needs question identities.
+    #[serde(default)]
+    pub questions_only: bool,
+}
+
 /// Parameters for removing one queued message by its stable identifier.
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]

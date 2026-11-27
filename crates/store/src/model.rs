@@ -214,6 +214,9 @@ pub enum RecordKind {
     /// payload nests it under `requestContent`: payload keys are flattened
     /// into the mutation, whose own `kind` would collide with the content's.
     RequestContent,
+    /// Read-only compatibility with policy records emitted by the N2 preview.
+    #[serde(rename = "file_approval_mode", skip_serializing)]
+    LegacyFileApprovalMode,
 }
 
 impl RecordKind {
@@ -235,6 +238,7 @@ impl RecordKind {
             Self::WriteDeferred => "write_deferred",
             Self::Usage => "usage",
             Self::RequestContent => "request_content",
+            Self::LegacyFileApprovalMode => "file_approval_mode",
         }
     }
 }
@@ -287,6 +291,18 @@ pub struct SessionEntry {
     /// Kind-specific fields preserved without schema loss.
     #[serde(flatten)]
     pub payload: serde_json::Map<String, serde_json::Value>,
+}
+
+impl SessionEntry {
+    /// Matches an extension-owned v4 custom entry without decoding its data.
+    pub fn is_custom(&self, extension_id: &str, custom_type: &str) -> bool {
+        let field = |name: &str| {
+            self.payload.get(name).and_then(serde_json::Value::as_str)
+        };
+        self.kind == EntryKind::Custom
+            && field("extensionId") == Some(extension_id)
+            && field("customType") == Some(custom_type)
+    }
 }
 
 /// Complete persisted lane record.
@@ -417,7 +433,8 @@ pub trait StoreFactory: Send + Sync {
     /// Opens an existing v4 JSONL session and repairs a torn final append.
     fn open(&self, path: &Path) -> Result<Box<dyn SessionStore>, StoreError>;
 
-    /// Forks one ancestor path into a new v4 session file.
+    /// Forks one ancestor path into a new v4 session file. Copied file approval
+    /// choices keep their entry IDs but must lose their data.sessionId before persistence.
     fn fork(
         &self,
         source_path: &Path,
@@ -515,6 +532,18 @@ pub trait SessionStore: Send {
 
     /// Returns all entries in shared sequence order.
     fn entries(&self) -> Vec<SessionEntry>;
+
+    /// Earliest sequence known to be authored locally rather than copied by a fork.
+    /// An old fork with only a linear branch may have no provable boundary yet.
+    fn first_local_sequence(&self) -> Option<u64>;
+
+    /// Finds the newest matching entry across all branches in shared sequence order.
+    fn latest_entry(
+        &self,
+        matches: &dyn Fn(&SessionEntry) -> bool,
+    ) -> Option<SessionEntry> {
+        self.entries().into_iter().rev().find(matches)
+    }
 
     /// Returns one root-to-leaf branch while detecting broken or cyclic links.
     fn branch(&self, leaf: &EntryId) -> Result<Vec<SessionEntry>, StoreError>;

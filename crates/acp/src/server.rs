@@ -1,5 +1,6 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::num::NonZeroUsize;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
@@ -30,7 +31,7 @@ use crate::extension::{
 use crate::input::PromptInput;
 use crate::login::LoginTask;
 use crate::permission::ApprovalBridge;
-use crate::plan::HiddenToolCalls;
+use crate::plan::{TodoToolCalls, ToolCallHistory};
 use crate::projection::{
     DurableResumeSelection, EventGroup, ForegroundState, LiveFeed,
     ProjectionFeed, ProjectionRegistry,
@@ -41,10 +42,12 @@ use crate::recovery::{
 };
 
 /// Cohesive ACP notification operations backed by one shared Kernel.
+#[derive(typed_builder::TypedBuilder)]
 pub(crate) struct AcpServer {
     kernel: Arc<Kernel>,
     projections: Arc<ProjectionRegistry>,
     elicitations: Arc<ElicitationBridge>,
+    history: ToolCallHistory,
 }
 
 /// Snapshot and live stream installed for one connection-level Session watcher.
@@ -183,20 +186,21 @@ impl ProjectionWatch {
     }
 }
 
-impl AcpServer {
-    /// Binds ACP notification operations to one Kernel instance.
-    pub(crate) fn new(
-        kernel: Arc<Kernel>,
-        projections: Arc<ProjectionRegistry>,
-        elicitations: Arc<ElicitationBridge>,
-    ) -> Self {
-        Self {
-            kernel,
-            projections,
-            elicitations,
-        }
+impl From<&ComponentContext> for AcpServer {
+    /// Captures this connection's negotiated projection policy when attaching a Session.
+    fn from(context: &ComponentContext) -> Self {
+        Self::builder()
+            .kernel(Arc::clone(&context.kernel))
+            .projections(Arc::clone(&context.projections))
+            .elicitations(Arc::clone(&context.watchers.elicitations))
+            .history(ToolCallHistory(
+                context.tool_call_history.load(Ordering::Relaxed),
+            ))
+            .build()
     }
+}
 
+impl AcpServer {
     /// Builds the Session's current config options for setup responses.
     pub(crate) fn config_options(
         &self,
@@ -291,7 +295,7 @@ impl AcpServer {
     ) -> Result<(), agent_client_protocol::Error> {
         let mut event_index = 0_usize;
         // Replay rebuilds which calls belong to `todo_write` from the messages it sends.
-        let mut hidden = HiddenToolCalls::default();
+        let mut todos = TodoToolCalls::default();
         for item in items {
             let events = match item {
                 protocol::SessionReplayItem::Message {
@@ -394,12 +398,14 @@ impl AcpServer {
                 let mut updates = mapper.updates().map_err(
                     agent_client_protocol::Error::into_internal_error,
                 )?;
-                hidden.apply(&event.payload, &mut updates);
+                todos.identify(&event.payload, &mut updates);
                 drop(mapper);
                 drop(event);
                 for update in updates {
                     // Durable replay is history; the current state follows as a snapshot.
-                    if matches!(update, wire::SessionUpdate::StateUpdate(_)) {
+                    if !self.history.includes(&update)
+                        || matches!(update, wire::SessionUpdate::StateUpdate(_))
+                    {
                         continue;
                     }
                     connection.send_notification(
@@ -555,11 +561,16 @@ impl AcpServer {
             }
             approvals
         };
+        let history = self.history;
         for group in std::mem::take(&mut watch.backlog) {
             // Replayed history never reports past states as current activity.
             if let Some(replayed) = group.replayed() {
                 for notification in replayed
-                    .notifications(session_id, ProductIdentity::ACP_NAMESPACE)
+                    .notifications(
+                        session_id,
+                        ProductIdentity::ACP_NAMESPACE,
+                        history,
+                    )
                     .map_err(
                         agent_client_protocol::Error::into_internal_error,
                     )?
@@ -692,6 +703,7 @@ impl AcpServer {
                         .notifications(
                             &task_session_id,
                             ProductIdentity::ACP_NAMESPACE,
+                            history,
                         )
                         .map_err(
                             agent_client_protocol::Error::into_internal_error,
@@ -767,6 +779,8 @@ struct ComponentContext {
     projections: Arc<ProjectionRegistry>,
     transport: crate::AcpTransportKind,
     watchers: ConnectionWatchers,
+    #[builder(default)]
+    tool_call_history: AtomicBool,
 }
 
 /// Mutable watcher collections shared by handlers on one ACP connection.
@@ -848,6 +862,7 @@ impl AcpServerFactory {
                         request.capabilities.elicitation.as_ref(),
                     ));
                     let operation = context.transport.request_log(&responder, &request);
+                    let context = Arc::clone(&context);
                     operation.run(async move {
                         // The SDK has already negotiated and rewritten the version.
                         tracing::info!(
@@ -896,6 +911,13 @@ impl AcpServerFactory {
                                 plans.len().saturating_sub(watch_count)
                             );
                         }
+                        let tool_call_history = request.meta.as_ref()
+                            .and_then(|meta| meta.get(ProductIdentity::ACP_NAMESPACE))
+                            .and_then(|product| product.get("toolCallHistory"))
+                            .and_then(serde_json::Value::as_bool)
+                            .unwrap_or(false);
+                        context.tool_call_history.store(tool_call_history, Ordering::Relaxed);
+                        tracing::debug!("negotiated ACP tool call history {}", tool_call_history);
                         let methods = [
                         AcpExtensionMethod::Tree,
                         AcpExtensionMethod::Navigate,
@@ -996,7 +1018,7 @@ impl AcpServerFactory {
                     let projections = Arc::clone(&context.projections);
                     let mcp_watchers = Arc::clone(&context.watchers.mcp);
                     let session_watchers = Arc::clone(&context.watchers.sessions);
-                    let elicitations = Arc::clone(&context.watchers.elicitations);
+                    let server = AcpServer::from(context.as_ref());
                     let operation = context.transport.request_log(&responder, &request);
                     operation.run(async move {
                         let cwd = AcpWorkingDirectory::try_from(
@@ -1015,7 +1037,6 @@ impl AcpServerFactory {
                             .map_err(
                                 agent_client_protocol::Error::into_internal_error,
                             )?;
-                        let server = AcpServer::new(kernel, projections, elicitations);
                         let commands =
                             server.send_available_commands(&session_id, &connection)?;
                         server.watch_mcp(
@@ -1096,7 +1117,7 @@ impl AcpServerFactory {
                     let projections = Arc::clone(&context.projections);
                     let mcp_watchers = Arc::clone(&context.watchers.mcp);
                     let session_watchers = Arc::clone(&context.watchers.sessions);
-                    let elicitations = Arc::clone(&context.watchers.elicitations);
+                    let server = AcpServer::from(context.as_ref());
                     let operation = context.transport.request_log(&responder, &request);
                     operation.run(async move {
                         let session_id = SessionId::try_from(request.session_id.to_string())
@@ -1149,11 +1170,6 @@ impl AcpServerFactory {
                         } else {
                             false
                         };
-                        let server = AcpServer::new(
-                            Arc::clone(&kernel),
-                            Arc::clone(&projections),
-                            elicitations,
-                        );
                         let durable_replay_from_start =
                             matches!(&replay, AcpReplayRequest::Start);
                         let replay_requested =
@@ -1762,7 +1778,7 @@ impl AcpServerFactory {
                     let projections = Arc::clone(&context.projections);
                     let mcp_watchers = Arc::clone(&context.watchers.mcp);
                     let session_watchers = Arc::clone(&context.watchers.sessions);
-                    let elicitations = Arc::clone(&context.watchers.elicitations);
+                    let server = AcpServer::from(context.as_ref());
                     let operation = context.transport.request_log(
                         &responder,
                         request.parameters(),
@@ -1786,7 +1802,7 @@ impl AcpServerFactory {
                             .mcp_watchers(mcp_watchers)
                             .projections(projections)
                             .session_watchers(session_watchers)
-                            .elicitations(elicitations)
+                            .server(server)
                             .build()
                         .execute(request)
                         .await?;
@@ -1978,6 +1994,11 @@ impl SessionConfigUpdate {
                         .set_session_mode(&task_session_id, mode)
                         .await
                         .map(|_mode| ()),
+                    ConfigChange::FileApproval(mode) => {
+                        task_kernel
+                            .set_session_file_approval(&task_session_id, mode)
+                            .await
+                    }
                 }
             })
             .await

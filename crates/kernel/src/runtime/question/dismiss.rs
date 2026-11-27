@@ -17,19 +17,34 @@ impl Kernel {
         session_id: &SessionId,
         keys: Vec<QuestionKey>,
     ) -> Result<usize, KernelError> {
+        Ok(self.dismiss_question_keys(session_id, keys).await?.len())
+    }
+
+    /// Returns the exact keys accepted under the admission ticket so callers can distinguish
+    /// skips from keys reserved by another client's removable answer.
+    pub async fn dismiss_question_keys(
+        &self,
+        session_id: &SessionId,
+        keys: Vec<QuestionKey>,
+    ) -> Result<Vec<QuestionKey>, KernelError> {
         let session = self.session(session_id)?;
         session.transcript.ensure_writable()?;
         // The ticket orders this skip with answers; it is held until the skip
         // is visible to the next settlement.
         let ticket = self.admission_ticket(session_id)?;
         ticket.wait().await?;
-        let Some(reply) =
+        let requested = keys.len();
+        let Some(mut skip) =
             QuestionLedger::try_from(session.as_ref())?.skip(keys)
         else {
-            return Ok(0);
+            tracing::debug!(
+                "none of {} questions requested for dismissal are open in session {}",
+                requested,
+                session_id
+            );
+            return Ok(Vec::new());
         };
-        let mut skip = ExtensionMessage::try_from(&reply)
-            .map_err(|error| KernelError::Protocol(error.to_string()))?;
+        let keys: Vec<_> = skip.keys().collect();
         loop {
             // Registered before the queue check, so a Run opening its queue
             // in between still wakes this skip.
@@ -37,7 +52,11 @@ impl Kernel {
             tokio::pin!(opened);
             opened.as_mut().enable();
             match session.execution.queue_skip(skip)? {
-                None => break,
+                None => {
+                    // A held skip closes the question on every client before its durable message exists.
+                    self.publish_queue_changed(session_id);
+                    break;
+                }
                 Some(returned) => skip = returned,
             }
             // A closed queue means an idle Session, another operation, or a
@@ -52,6 +71,8 @@ impl Kernel {
                 () = &mut opened => {}
                 operation = session.acquire_operation() => {
                     let _operation = operation?;
+                    let extension = ExtensionMessage::try_from(&skip)
+                        .map_err(|error| KernelError::Protocol(error.to_string()))?;
                     let emitter = EventEmitter {
                         clock: Arc::clone(&self.clock),
                         sink: self.session_sink(session_id),
@@ -62,7 +83,7 @@ impl Kernel {
                             self,
                             &emitter,
                             &self.new_turn_id()?,
-                            vec![skip],
+                            vec![extension],
                         )
                         .await?;
                     break;
@@ -70,10 +91,11 @@ impl Kernel {
             }
         }
         tracing::info!(
-            "dismissed {} questions in session {}",
-            reply.items.len(),
+            "dismissed {} of {} requested questions in session {}",
+            keys.len(),
+            requested,
             session_id
         );
-        Ok(reply.items.len())
+        Ok(keys)
     }
 }

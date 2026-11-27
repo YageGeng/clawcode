@@ -14,19 +14,22 @@ import type { IconColor, IconName } from "./icon";
 import { motionClass } from "./motion";
 import { type } from "./tokens";
 
-/** The one popup surface menus, popovers and selects share (spec §5.1: one popover look). */
-export const popupSurface = `rounded-(--radius-lg) border border-border bg-popover p-1.5 shadow-lg ${motionClass.popup}`;
+/** The one popup surface menus, popovers and selects share (spec §5.1: one popover look); opens and closes immediately without fade. */
+export const popupSurface = "rounded-(--radius-lg) border border-border bg-popover p-1.5 shadow-lg";
 
-/** A menu its trigger opens: grows out of the trigger; Escape and a press outside close it. An optional `title` heads it. */
-export function Menu(props: { trigger: JSX.Element; children: JSX.Element; title?: string; align?: "start" | "end" }) {
+/** A menu its trigger opens immediately; Escape and a press outside close it. An optional `title` heads it. */
+export function Menu(props: {
+  trigger: JSX.Element; children: JSX.Element; title?: string; align?: "start" | "end"; class?: string;
+  open?: boolean; onOpenChange?: (open: boolean) => void;
+}) {
   return (
     <BaseMenu
       trigger={props.trigger}
+      open={props.open}
+      onOpenChange={(event) => props.onOpenChange?.(event.open)}
       align={props.align ?? "start"}
       offset={6}
-      popupClass={`min-w-48 ${popupSurface}`}
-      popupStartingClass={motionClass.popupStarting}
-      popupEndingClass={motionClass.popupEnding}
+      popupClass={`min-w-48 ${popupSurface} ${props.class ?? ""}`}
     >
       <If when={props.title}>
         {(title) => <Text class={`px-2.5 pt-1 pb-1.5 ${type.meta} text-muted-foreground`}>{title()}</Text>}
@@ -102,15 +105,23 @@ export function Submenu(props: { label: string; icon?: IconName; children: JSX.E
   );
 }
 
-/** Content anchored to its trigger: same surface and motion as a menu. */
-export function Popover(props: { trigger: JSX.Element; children: JSX.Element; class?: string }) {
+/** Content anchored to its trigger: same instant popup surface as a menu. */
+export function Popover(props: {
+  trigger: JSX.Element;
+  children: JSX.Element;
+  class?: string;
+  open?: boolean;
+  onOpenChange?: (open: boolean) => void;
+  onOpen?: () => void;
+}) {
   return (
     <BasePopover
       trigger={props.trigger}
+      open={props.open}
+      onOpenChange={(event) => props.onOpenChange?.(event.open)}
+      onOpen={props.onOpen}
       offset={6}
       popupClass={`${popupSurface} p-3 ${props.class ?? ""}`}
-      popupStartingClass={motionClass.popupStarting}
-      popupEndingClass={motionClass.popupEnding}
     >
       {props.children}
     </BasePopover>

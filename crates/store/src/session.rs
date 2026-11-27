@@ -11,8 +11,8 @@ use crate::state::{
     NameFactMutation, RecordMutation, SessionState,
 };
 use crate::{
-    Clock, EntryKind, LogMutation, NewEntry, NewRecord, SessionEntry,
-    SessionRecord, SessionStore, StoreError, SyncObserver,
+    Clock, EntryKind, LogMutation, NewEntry, NewRecord, RecordKind,
+    SessionEntry, SessionRecord, SessionStore, StoreError, SyncObserver,
 };
 
 #[derive(typed_builder::TypedBuilder)]
@@ -177,6 +177,29 @@ impl JsonlSessionStore {
             return;
         };
         state.next_sequence = sequence;
+        if state.first_local_sequence.is_none() {
+            // Older forks copied at most one initial non-main lane declaration,
+            // then request content records and a single linear chain of entries.
+            // Every subsequent mutation after the first deviation is local.
+            let may_be_copied = match &mutation {
+                LogMutation::Lane { lane, leaf_id, .. } => {
+                    sequence == 1
+                        && lane.as_str() != "main"
+                        && leaf_id.is_none()
+                }
+                LogMutation::Record(record) => {
+                    record.kind == RecordKind::RequestContent
+                        && state.entry_order.is_empty()
+                }
+                LogMutation::Entry { entry, .. } => {
+                    state.entry_order.last() == entry.parent_id.as_ref()
+                }
+                _ => false,
+            };
+            if !may_be_copied {
+                state.first_local_sequence = Some(sequence);
+            }
+        }
         match mutation {
             LogMutation::Lane { lane, leaf_id, .. } => {
                 state.lanes.insert(lane, leaf_id);
@@ -321,6 +344,25 @@ impl SessionStore for JsonlSessionStore {
             .iter()
             .filter_map(|id| self.state.entries.get(id).cloned())
             .collect()
+    }
+
+    /// Reports the first mutation proven to follow this Session's fork copy.
+    fn first_local_sequence(&self) -> Option<u64> {
+        self.state.first_local_sequence
+    }
+
+    /// Scans entries by reference so restoring a Session setting never clones its transcript.
+    fn latest_entry(
+        &self,
+        matches: &dyn Fn(&SessionEntry) -> bool,
+    ) -> Option<SessionEntry> {
+        self.state
+            .entry_order
+            .iter()
+            .rev()
+            .filter_map(|id| self.state.entries.get(id))
+            .find(|entry| matches(entry))
+            .cloned()
     }
 
     /// Walks parent links from a selected leaf and returns root-to-leaf order.

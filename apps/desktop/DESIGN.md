@@ -73,9 +73,10 @@ menu, never hover-only.
   running and needs-attention states.
 - **Session view** (`background`): header with the workspace icon and title, more and panel toggles on the right. The
   transcript is one centered column at most about 760pt wide. User messages are right-aligned `secondary` pills;
-  replies have no bubble. Work folds into "Worked for X ›"; expanded, commentary interleaves grey one-line tool
-  summaries, which expand to a command list with a left guide line. File-change cards ("Edited file +N −N", View
-  changes). Message actions (copy, more) and the time under replies; a round scroll-to-bottom button.
+  the latest assistant reply appears directly below the work and streams in place. Under "Working" or "Worked
+  for X", thoughts, interim messages and named tool calls start folded in event order. Opening a tool reveals
+  its input and result. Copy and timestamp sit under the finished reply. A separate disclosure lists changed
+  files. A round button returns to the bottom.
 - **Empty state:** a centered icon and a `type.heading` line "What should we build in *workspace*?", the workspace
   name opening a switcher.
 - **Composer:** a `floating` surface card at the bottom center. For a new session a context strip above it picks
@@ -114,11 +115,11 @@ the content is new (a running turn), since the list remounts rows as they scroll
 | Button / IconButton hover | `accent` wash in, `instant`, ease-out | Instant |
 | Button / IconButton press | Scale 0.97 (icon 0.95), `fast`, settle | No scale |
 | CopyButton copied | Copy glyph swaps to check (old fades out, new fades in), `base`; reverts after 1.5s | Instant swap |
-| Checkbox toggles | Check mark fades in, `fast` | Instant |
+| Checkbox toggles | Check mark switches immediately without fade; box color wash `instant` | Instant |
 | Switch toggles | Thumb slides across the track, `base`, ease-in-out; track color `instant` | Thumb jumps |
 | Tabs selection | One indicator slides to the chosen tab (base `Tabs` indicator), `base`, ease-in-out | Jumps |
-| Select / Menu / Popover open | Grows from the trigger edge: 0.96 scale and 8pt slide toward the trigger, fade, `slow`, ease-out; leaves in `base`, ease-in. A title row and item descriptions add no motion of their own | Appears and leaves at once |
-| Submenu open | Same as Menu, sliding from the parent row's side | At once |
+| Select / Menu / Popover open | Appears and leaves at once (no fade-in or fade-out). A title row and item descriptions add no motion of their own | Appears and leaves at once |
+| Submenu open | Appears and leaves at once beside the parent row | At once |
 | Tooltip | Fades in 4pt toward the trigger, `fast`; leaves `instant` | At once |
 | Dialog open | Scrim fades `slow`; panel rises 8pt from 0.96, `slow`, ease-out; leaves `base`, ease-in | At once |
 | Sheet open | Slides in from its side, `slow`, ease-out; leaves `base` | At once |
@@ -140,7 +141,7 @@ the content is new (a running turn), since the list remounts rows as they scroll
 | Back / Forward become enabled or disabled | Opacity `instant` | Instant |
 | Current session changes | The selected pill switches `instant` (dense list, no slide) | Instant |
 | Workspace group expands / collapses | Chevron rotates 90° `fast`; rows appear with `LayoutAnimation` `base` | Instant |
-| Host menu opens | Shared popover motion (grows from the trigger, `slow`; leaves `base`) | At once |
+| Host menu opens | Shared instant popup surface (appears and leaves at once, no fade) | At once |
 | A session starts or stops running | Spinner appears / leaves at once; spins while running | Spinner rests |
 | A session needs approval | Status dot appears `instant`, in place of the running spinner (waiting on the user wins) | Instant |
 | The host goes offline (its backend stopped) | The reason appears at once above the Session, which stays; spinners stop | Same |
@@ -153,10 +154,10 @@ the content is new (a running turn), since the list remounts rows as they scroll
 | Change | Motion | Reduced motion |
 | --- | --- | --- |
 | A new turn's user pill arrives | `Appear` rise: 8pt and fades in, `slow`, ease-out (running turns only, not replays or remounted rows) | Appears |
-| Reply streams in | Text grows in place (no per-token animation); while running a caret breathes after the last line | Caret rests, no breathing |
-| "Worked for" folds / unfolds | Chevron rotates 90° `fast`; the steps appear with `LayoutAnimation` `base` | Instant |
-| A tool group unfolds | Same as "Worked for" | Instant |
-| A turn ends | Its work folds under "Worked for" with `LayoutAnimation` `base`; the answer's actions appear with it | Instant |
+| Reply streams in | Reply text grows in place. A caret marks the running turn. | Caret rests |
+| Assistant media or a recorded question decision arrives | Media appears between the surrounding text. Answers and skips appear in user bubbles at their transcript position. | Same |
+| Work, thought, interim message, tool or changed files toggled | The chevron rotates 90° and the next layout uses the shared disclosure transition. Opening a parent restores its children's selections. | Instant |
+| A turn ends | The duration replaces the working label. Open sections keep their state and the reply gains copy and time. | Same |
 | File-change card appears | Appears with its turn (no motion of its own: the row remounts on scroll) | Appears |
 | Jump-to-bottom button appears / leaves | Fades and rises 4pt, `fast`; leaves `instant` | Appears and leaves at once |
 | Copy pressed | CopyButton glyph swap (`base`) | Instant swap |
@@ -172,6 +173,7 @@ the content is new (a running turn), since the list remounts rows as they scroll
 | The field grows from 2 to 8 lines | Grows with its text, no animation; past 8 lines it scrolls to the caret | Same |
 | Approval card arrives | `Appear` rise: 8pt above the composer and fades in, `slow`, ease-out | Appears |
 | Approval card answered | Fades out while the composer settles with `LayoutAnimation` `base`; withdrawn by the agent, it leaves at once | Leaves at once |
+| A slash prefix opens command suggestions | The matching rows appear immediately above the field without fade. Arrow keys move selection within the list, and choosing a command returns focus to its draft. | The rows appear immediately; selection and focus stay visible. |
 | Context strip (new session) | Fades in with the empty state, `fast`; leaves with it when the Session opens | At once |
 | A failed send's text comes back | The field's text is replaced in place; a toast slides in (toast motion) | Toast appears |
 
@@ -234,7 +236,7 @@ events in the desktop composer. The first Enter committed the preedit to the dra
 
 | Change | Motion | Reduced motion |
 | --- | --- | --- |
-| Open the computer menu or select a paired computer | Existing menu grows from its trigger. The selected computer's workspace and sessions appear together. | Instant |
+| Open the computer menu or select a paired computer | Existing menu appears and leaves at once without fade. The selected computer's workspace and sessions appear together. | Instant |
 | Open sharing settings, pairing form, invitation or confirmation | One desktop dialog fades in. An incoming request takes focus and names this computer as the target. Closing returns to the preceding view. | Instant |
 | Enable sharing, approve, disconnect, revoke or try again | The pressed control uses its normal wash and press scale. Pending actions disable repeats. Connection counts, device rows and errors update in place. | Instant, status text remains visible |
 | Show a pairing code | The QR appears at full contrast with a quiet zone. Its expiration is shown in text. Copy uses the shared clipboard feedback. | Same |
@@ -245,3 +247,21 @@ events in the desktop composer. The first Enter committed the preedit to the dra
 Checked the production remote-control dialog on GTK/Wayland at 800 × 560 in English light mode and Simplified Chinese dark mode. Both languages fit the form, use the existing control and dialog radii, and align the name, switch, and device list to the same left edge. The empty, connected, disconnected, and revoked states have text or an action that identifies them. A camera decoder read the invitation directly from the rendered QR at the minimum window size.
 
 Escape now returns from the invitation to the device list, then to Settings. The real GTK input path and a focused headless regression test cover that sequence. The two-window check exercised pairing, permission prompts, and revocation. Still images cover layout, colors, text, and resting states. Screen-reader narration, reduced-motion playback, and pointer hover/press timing have not been observed.
+
+## Motion inventory for N2 session configuration
+
+| Interaction | Feedback | Reduced motion |
+| --- | --- | --- |
+| Open session settings | The popup uses the shared instant surface with no fade transition. Keyboard focus enters the choices and returns on dismissal. | Selection and focus remain visible immediately. |
+| Change a model, thinking level or mode | The current choice follows the host response. Disable overlapping edits while saving and keep the previous selection visible on failure. | Same feedback using reduced-motion settings. |
+| Switch hosts or sessions | Show the selected session's settings with its composer. A closed connection leaves the last confirmed values readable. | Same. |
+| Adjust external file approvals | A checked menu row identifies the current policy. The policy can be changed during a running turn. The automatic-allow choice uses the warning role and describes the file access it grants. | Same selection and text. |
+| Answer a question or review a plan | A question card enters above the composer without taking keyboard focus. If another client answers an earlier question, keep the selected question and its draft in view. A disclosure reveals plan details. Long content scrolls separately from the answer buttons. | Omit entrance movement. |
+| Choose a slash command | Suggestions update as the user types. Selecting one inserts its text into the draft and returns focus to the input. | Same. |
+| Add or remove a picture | Show selected pictures together above the draft with individual removal buttons. Reading or failure is indicated in the composer. | Same feedback without movement. |
+
+### N2 Linux check record
+
+Two production GTK windows on Wayland used independent host profiles. The controller changed a remote session's model, thinking level, mode and external-write policy. The model picker showed the full model name at 800 × 560. In Simplified Chinese dark mode, all three file policy descriptions wrapped inside the menu and the check followed the active option. Keyboard steps and pointer dragging both changed the thinking level.
+
+The production question flow kept the message draft visible while awaiting an answer. A proposed plan showed its Markdown above the separate decision buttons. The accepted plan could be reopened after the turn. The native file picker produced a removable thumbnail and the paired host received the selected image. The [N2 acceptance record](../../docs/superpowers/plans/2026-11-26-desktop-nsh-n2.md) lists the session, command and attachment checks.

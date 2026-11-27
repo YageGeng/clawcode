@@ -13,7 +13,7 @@ use tokio::sync::broadcast;
 use crate::AcpEventMapper;
 use crate::elicitation::ElicitationChange;
 use crate::permission::{ApprovalChange, ApprovalPeers, PendingApproval};
-use crate::plan::HiddenToolCalls;
+use crate::plan::{TodoToolCalls, ToolCallHistory};
 use crate::recovery::{
     GroupMeta, OperationPhase, RecoveryMode, RecoveryPlan, SessionCursor,
 };
@@ -93,10 +93,15 @@ impl EventGroup {
         &self,
         session_id: &SessionId,
         namespace: &str,
+        history: ToolCallHistory,
     ) -> Result<Vec<wire::UpdateSessionNotification>, ProjectionError> {
-        let projection_count = self.updates.len();
-        self.updates
+        // Recovery cursors count only the notifications visible on this connection.
+        let visible = self
+            .updates
             .iter()
+            .filter(|update| history.includes(update));
+        let projection_count = visible.clone().count();
+        visible
             .cloned()
             .enumerate()
             .map(|(projection_index, update)| {
@@ -186,8 +191,8 @@ struct ProjectionState {
     last_sequence: Option<Sequence>,
     /// Foreground state left by the newest broadcast state update.
     foreground: ForegroundState,
-    /// `todo_write` calls whose tool card updates are never sent.
-    hidden_tool_calls: HiddenToolCalls,
+    /// In-flight todo identities shared by every connection watching the Session.
+    todo_tool_calls: TodoToolCalls,
 }
 
 impl ProjectionState {
@@ -498,17 +503,17 @@ impl SessionProjection {
             .build())
     }
 
-    /// Drops tool card updates for this Session's `todo_write` calls.
-    pub(crate) fn hide_tool_calls(
+    /// Records the identity of todo patches before the group enters the shared journal.
+    pub(crate) fn identify_todo_calls(
         &self,
         payload: &protocol::AgentEventPayload,
-        updates: &mut Vec<wire::SessionUpdate>,
+        updates: &mut [wire::SessionUpdate],
     ) -> Result<(), ProjectionError> {
         self.state
             .lock()
             .map_err(|_poison_error| ProjectionError::Poisoned)?
-            .hidden_tool_calls
-            .apply(payload, updates);
+            .todo_tool_calls
+            .identify(payload, updates);
         Ok(())
     }
 
@@ -1014,7 +1019,7 @@ impl EventSink for ProjectionSink {
             SinkError::Consumer(error.to_string())
         })?;
         projection
-            .hide_tool_calls(&event.payload, &mut updates)
+            .identify_todo_calls(&event.payload, &mut updates)
             .map_err(|error| SinkError::Consumer(error.to_string()))?;
         // Release native event payloads before publishing or waiting for downstream capacity.
         drop(mapper);
@@ -1835,7 +1840,7 @@ mod tests {
             .backlog
             .last()
             .expect("latest queue")
-            .notifications(&session_id, "clawcode")
+            .notifications(&session_id, "clawcode", Default::default())
             .expect("notifications");
         let json = serde_json::to_value(notifications).expect("serialize");
         assert_eq!(
@@ -2161,6 +2166,7 @@ mod tests {
             .notifications(
                 &SessionId::try_from("session-1").expect("Session id"),
                 "clawcode",
+                Default::default(),
             )
             .expect("build grouped notifications");
 

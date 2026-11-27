@@ -90,19 +90,20 @@ impl Kernel {
         let (update_channel, mut update_stream) = ToolUpdateChannel::new();
         let mut terminate = false;
 
-        // The built-in mutation tools consult this gate after replacement and validation.
-        let file_mutation_approver = (self.approval_policy
-            == config::AskForApproval::OnRequest)
-            .then(|| {
-                Arc::new(
-                    FileApprovalGate::builder()
-                        .session(Arc::clone(batch.session))
-                        .turn_id(batch.turn_id.clone())
-                        .id_generator(Arc::clone(&self.id_generator))
-                        .cancellation(batch.cancellation.clone())
-                        .build(),
-                ) as Arc<dyn ::tools::FileMutationApprover>
-            });
+        // Each built-in mutation consults the live Session policy after argument validation.
+        let file_mutation_approver: Arc<dyn ::tools::FileMutationApprover> =
+            Arc::new(
+                FileApprovalGate::builder()
+                    .session(Arc::clone(batch.session))
+                    .turn_id(batch.turn_id.clone())
+                    .id_generator(Arc::clone(&self.id_generator))
+                    .cancellation(batch.cancellation.clone())
+                    .host_asks(
+                        self.approval_policy
+                            == config::AskForApproval::OnRequest,
+                    )
+                    .build(),
+            );
         let calls = std::mem::take(&mut batch.calls);
         for (index, mut call) in calls.into_iter().enumerate() {
             let started_at = self.clock.now();
@@ -234,9 +235,9 @@ impl Kernel {
                 .turn_id(batch.turn_id.clone())
                 .trace_id(batch.trace_id.clone())
                 .cwd(batch.session.cwd.clone())
-                .file_mutation_approver(
-                    file_mutation_approver.as_ref().map(Arc::clone),
-                )
+                .file_mutation_approver(Some(Arc::clone(
+                    &file_mutation_approver,
+                )))
                 .cancellation(batch.cancellation.clone())
                 .updates(update_channel.publisher(call.clone()))
                 .build();

@@ -7,8 +7,8 @@ import { motionClass } from "./motion";
 
 /** Each surface's look: a content card, or the floating composer card (spec §5.1). */
 const surfaceVariant = {
-  card: "rounded-(--radius-lg) border border-border bg-card p-4 gap-3",
-  floating: "rounded-(--radius-xl) border border-border bg-background p-3 gap-2 shadow-md",
+  card: "rounded-(--radius-lg) border border-border bg-card p-4 gap-3 shadow-xs",
+  floating: "rounded-(--radius-xl) border border-input bg-card px-3.5 pt-3 pb-2.5 gap-2 shadow-md",
 } as const;
 
 /** A container for a group of content: a `card` (default) or the `floating` composer card. */

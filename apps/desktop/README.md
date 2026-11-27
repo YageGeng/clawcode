@@ -5,7 +5,8 @@ The desktop client written in TSX on [NSH](https://nsh.dev), with one Rust crate
 - `App.tsx`: the entry.
 - `ext/backend`: the `clawcode-backend` native module (`nsh.json` `"rust"`). It is a member of the root Cargo
   workspace, so it inherits dependencies from the root `[workspace.dependencies]`.
-- `src/client`: the ACP client (transport interface, protocol, session state), owned by this app. Its tests are `src/client/*.test.ts`, run by `nsh test`.
+- `src/client`: the ACP client (transport interface, protocol, session state), owned by this app.
+- `tests`: unit and UI tests (`tests/**/*.test.{ts,tsx}`), entries and fixtures, run by `nsh test`.
 
 ```sh
 nsh check    # cargo check of ext/backend, then type checks the TSX

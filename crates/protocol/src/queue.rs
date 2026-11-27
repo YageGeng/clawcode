@@ -1,6 +1,8 @@
+use std::collections::BTreeSet;
+
 use serde::{Deserialize, Serialize};
 
-use crate::{AgentMessage, QueueId};
+use crate::{AgentMessage, QuestionKey, QueueId};
 
 /// Position at which a queued message participates in an active run.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -66,4 +68,8 @@ pub struct PendingMessages {
     pub steering: Vec<QueuedMessage>,
     /// Messages consumed only when the run would otherwise settle.
     pub follow_up: Vec<QueuedMessage>,
+    /// Questions reserved by queued messages, held skips, or in-flight inputs.
+    #[serde(default)]
+    #[builder(default)]
+    pub reserved_questions: BTreeSet<QuestionKey>,
 }

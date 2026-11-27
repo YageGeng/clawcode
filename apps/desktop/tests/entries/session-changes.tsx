@@ -9,7 +9,8 @@ mountSession((agent) => {
       title: "Edit src/a.rs",
       kind: "edit",
       status: "completed",
-      content: [{ type: "diff", path: "src/a.rs", oldText: "x", newText: "x\nA\nB\nC" }],
+      content: [{ type: "diff", changes: [{ operation: "modify", path: "src/a.rs" }],
+        patch: { format: "git_patch", text: "diff --git src/a.rs src/a.rs\n--- src/a.rs\n+++ src/a.rs\n@@ -1 +1,4 @@\n x\n+A\n+B\n+C" } }],
     }),
     agent.agentMessage("s1", "a1", "Added three lines."),
   ]);

@@ -314,7 +314,8 @@ impl SessionStore for DurabilityStore {
             | RecordKind::ToolStarted
             | RecordKind::WriteDeferred
             | RecordKind::Usage
-            | RecordKind::RequestContent => None,
+            | RecordKind::RequestContent
+            | RecordKind::LegacyFileApprovalMode => None,
         };
         if let Some(marker) = marker {
             self.order.lock().expect("durability lock").push(marker);
@@ -339,6 +340,11 @@ impl SessionStore for DurabilityStore {
     /// Returns the delegated shared mutation sequence.
     fn last_sequence(&self) -> u64 {
         self.inner.last_sequence()
+    }
+
+    /// Preserves the wrapped store's boundary between copied and local entries.
+    fn first_local_sequence(&self) -> Option<u64> {
+        self.inner.first_local_sequence()
     }
 
     /// Records and delegates session-name persistence.

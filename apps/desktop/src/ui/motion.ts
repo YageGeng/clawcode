@@ -26,12 +26,6 @@ export const motionClass = {
   press: "transition duration-180 ease-[cubic-bezier(0.22,1,0.36,1)] active:scale-[0.97] motion-reduce:transition-none motion-reduce:active:scale-100",
   /** A press on a square icon control. */
   pressIcon: "transition duration-180 ease-[cubic-bezier(0.22,1,0.36,1)] active:scale-[0.95] motion-reduce:transition-none motion-reduce:active:scale-100",
-  /** A popup's open transition (menu, popover, select): grows out of its trigger. */
-  popup: "transition duration-360 ease-out motion-reduce:transition-none",
-  /** Where a popup below its trigger starts: shrunk, slid toward the trigger, transparent. */
-  popupStarting: "opacity-0 scale-[0.96] -translate-y-2",
-  /** How a popup leaves: faster, without overshoot. */
-  popupEnding: "opacity-0 scale-[0.96] -translate-y-2 duration-240 ease-in",
   /** A tooltip fading in 4pt toward its trigger. */
   tooltip: "transition duration-180 ease-out motion-reduce:transition-none",
   tooltipStarting: "opacity-0 translate-y-1",
@@ -42,8 +36,6 @@ export const motionClass = {
   toastEnding: "opacity-0 translate-y-4 duration-240 ease-in",
   /** A selection or a thumb moving between two places. */
   move: "transition-all duration-240 ease-in-out motion-reduce:transition-none",
-  /** A glyph swapping: the outgoing and incoming icons fade across. */
-  swap: "transition-opacity duration-240 ease-in-out motion-reduce:transition-none",
   /** A disclosure chevron turning toward what it opened; add `rotate-90` (or a variant of it) when open. */
   turn: "transition-transform duration-180 motion-reduce:transition-none",
   /** Something working without an end in sight: a spinner. */

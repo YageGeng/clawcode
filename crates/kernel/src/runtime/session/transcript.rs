@@ -132,10 +132,17 @@ impl SessionTranscript {
         entry: NewEntry,
     ) -> Result<(), KernelError> {
         let mut state = self.writable()?;
-        let outcome = state
-            .store
-            .append_entry(&self.lane, entry)
-            .and_then(|_entry| state.store.sync());
+        let outcome = (|| {
+            // A cursor checkpoint is valid v4 and is never copied into a
+            // fork. It proves this explicit choice was made in this log even
+            // when an older fork carried no boundary between copied and local entries.
+            if state.store.first_local_sequence().is_none() {
+                let leaf = state.store.lane(&self.lane).cloned();
+                state.store.move_lane(&self.lane, leaf)?;
+            }
+            state.store.append_entry(&self.lane, entry)?;
+            state.store.sync()
+        })();
         if let Err(error) = outcome {
             state.write_failed = true;
             tracing::error!(
@@ -147,7 +154,7 @@ impl SessionTranscript {
         }
         Ok(())
     }
-    /// Commits a queue mutation and its durability checkpoint under one transcript lock.
+    /// Commits Session records and their durability checkpoint under one transcript lock.
     pub(in crate::runtime) fn commit_records(
         &self,
         records: Vec<NewRecord>,
@@ -155,10 +162,12 @@ impl SessionTranscript {
         let mut state = self.writable()?;
         for record in records {
             let id = record.id.clone();
+            let kind = record.kind.as_str();
             if let Err(error) = state.store.append_record(record) {
                 state.write_failed = true;
                 tracing::error!(
-                    "failed queue record {} for session {}; persistence uncertain: {}",
+                    "failed to persist {} record {} for session {}; persistence uncertain: {}",
+                    kind,
                     id,
                     state.store.session_id(),
                     error
@@ -169,7 +178,7 @@ impl SessionTranscript {
         if let Err(error) = state.store.sync() {
             state.write_failed = true;
             tracing::error!(
-                "failed queue sync for session {}; persistence uncertain: {}",
+                "failed to sync records for session {}; persistence uncertain: {}",
                 state.store.session_id(),
                 error
             );
@@ -1094,6 +1103,11 @@ mod tests {
         /// Delegates the latest shared mutation sequence.
         fn last_sequence(&self) -> u64 {
             self.inner.last_sequence()
+        }
+
+        /// Preserves the wrapped store's boundary between copied and local entries.
+        fn first_local_sequence(&self) -> Option<u64> {
+            self.inner.first_local_sequence()
         }
 
         /// Delegates Session naming.

@@ -18,6 +18,7 @@
   "capabilities": {
     "application": true,
     "clipboard": true,
+    "picker": true,
     "process": {
       "env": ["CLAW_CONFIG", "CLAW_DESKTOP_RELAY"]
     }

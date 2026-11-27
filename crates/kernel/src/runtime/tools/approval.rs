@@ -6,8 +6,9 @@ use std::sync::{Arc, Mutex};
 
 use ::tools::{FileMutationApprover, ToolError};
 use protocol::{
-    AgentEventPayload, FileApprovalDecision, FileApprovalRequest, IdGenerator,
-    IdKind, SessionId, TimestampMs, ToolCall, TurnId,
+    AgentEventPayload, FileApprovalDecision, FileApprovalMode,
+    FileApprovalRequest, IdGenerator, IdKind, SessionId, TimestampMs, ToolCall,
+    TurnId,
 };
 use tokio::sync::oneshot;
 use tokio_util::sync::CancellationToken;
@@ -24,6 +25,17 @@ struct PendingFileApproval {
 #[derive(Default)]
 pub(in crate::runtime) struct SessionFileApprovals {
     pending: Mutex<BTreeMap<String, PendingFileApproval>>,
+    pub(in crate::runtime) mode: Mutex<FileApprovalMode>,
+}
+
+impl From<FileApprovalMode> for SessionFileApprovals {
+    /// Starts the Session with its durable policy and no outstanding prompts.
+    fn from(mode: FileApprovalMode) -> Self {
+        Self {
+            mode: Mutex::new(mode),
+            ..Self::default()
+        }
+    }
 }
 
 /// Removes an abandoned request and balances the shared Run wait count on every exit.
@@ -52,9 +64,32 @@ pub(super) struct FileApprovalGate {
     pub(super) turn_id: TurnId,
     pub(super) id_generator: Arc<dyn IdGenerator>,
     pub(super) cancellation: CancellationToken,
+    pub(super) host_asks: bool,
 }
 
 impl FileApprovalGate {
+    /// Resolves the current Session choice against the host's configured default.
+    fn should_ask(&self, call: &ToolCall) -> Result<bool, ToolError> {
+        let mode =
+            self.session.file_approvals.mode.lock().map_err(|error| {
+                tracing::warn!(
+                    "failed to read file approval policy for call {}: {}",
+                    call.tool_call_id,
+                    error
+                );
+                ToolError::Execution {
+                    tool: call.name.clone(),
+                    message: "Could not read the Session file approval policy."
+                        .into(),
+                }
+            })?;
+        Ok(match *mode {
+            FileApprovalMode::Host => self.host_asks,
+            FileApprovalMode::Ask => true,
+            FileApprovalMode::Allow => false,
+        })
+    }
+
     /// Sends the prompt and waits for either its first decision or cancellation.
     async fn request(
         &self,
@@ -134,7 +169,15 @@ impl FileApprovalGate {
 
 #[async_trait::async_trait]
 impl FileMutationApprover for FileApprovalGate {
-    /// Allows only an explicit affirmative response for this exact invocation.
+    /// On-request hosts always isolate saves. Other hosts also pin targets when asking.
+    fn requires_guarded_save(
+        &self,
+        call: &ToolCall,
+    ) -> Result<bool, ToolError> {
+        Ok(self.host_asks || self.should_ask(call)?)
+    }
+
+    /// Checks the latest policy for this resolved external target before publishing a prompt.
     async fn approve(
         &self,
         call: &ToolCall,
@@ -142,6 +185,15 @@ impl FileMutationApprover for FileApprovalGate {
     ) -> Result<(), ToolError> {
         if self.cancellation.is_cancelled() {
             return Err(ToolError::Cancelled);
+        }
+        if !self.should_ask(call)? {
+            tracing::debug!(
+                "allowed external {} call {} on {} under the Session file approval policy",
+                call.name,
+                call.tool_call_id,
+                target.display()
+            );
+            return Ok(());
         }
         // A symlink may resolve to a Unix byte path that a JSON permission prompt cannot identify.
         if target.to_str().is_none() {

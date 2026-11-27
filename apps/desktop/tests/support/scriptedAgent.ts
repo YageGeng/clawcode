@@ -157,6 +157,10 @@ export class ScriptedAgent {
         return this.respond(id, null);
       case "_clawcode/session/runtime":
         return this.respond(id, { running: this.running.has(String(params.sessionId)) });
+      case "_clawcode/session/pending_messages":
+        return this.respond(id, { reservedQuestions: [] });
+      case "_clawcode/session/question/dismiss":
+        return this.respond(id, { skipped: params.items });
       case "session/prompt": {
         const prompt = Array.isArray(params.prompt) ? (params.prompt as Array<{ text?: string }>) : [];
         return this.onPrompt({ id, sessionId: String(params.sessionId), text: prompt.map((block) => block.text ?? "").join("") });

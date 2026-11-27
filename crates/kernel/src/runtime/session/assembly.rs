@@ -124,7 +124,14 @@ impl SessionAssembly<'_> {
         // Usage events synthesized from persisted Assistant messages.
         let initial_event_sequence =
             Kernel::replay_sequence_floor(self.store.as_ref(), &lane)?;
-        let queue = PendingQueue::restore(self.store.as_ref())?;
+        // Legacy approval records and queue recovery share an ordered record snapshot.
+        let records = self.store.records();
+        let file_approval = settings::FileApprovalChoice::restore(
+            self.store.as_ref(),
+            &records,
+        )?;
+        let queue = PendingQueue::restore(self.store.as_ref(), &records)?;
+        drop(records);
         let commands = DynamicCommandRegistry::new(self.extensions.commands())
             .map_err(|error| {
                 KernelError::ExtensionBlocked(error.to_string())
@@ -181,6 +188,7 @@ impl SessionAssembly<'_> {
                 .resources(OnceLock::new())
                 .extensions(extensions)
                 .tools(tools)
+                .file_approvals(file_approval.into())
                 .model(SessionModelState::new(
                     session_models,
                     settings.model,

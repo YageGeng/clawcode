@@ -529,9 +529,49 @@ async fn in_flight_answers_close_the_question() {
         .pending_messages(&busy.session)
         .expect("pending");
     assert!(pending.steering.is_empty());
+    assert_eq!(
+        serde_json::to_value(&pending).unwrap()["reservedQuestions"],
+        serde_json::json!([busy.key(0)])
+    );
     assert!(is_closed(&busy.answer(0, "second").await, 0));
     hold.release.notify_one();
     run.await.expect("join").expect("Run");
+}
+
+/// An unwritten first-input answer reserves its key live and releases it again if cancelled.
+#[tokio::test]
+async fn cancelled_first_answer_publishes_the_reopened_question() {
+    let hold = HoldReply::new();
+    let asked = Asked::idle(
+        Script::which_db(AfterAsk::Answer).holding(hold.clone()),
+        "answer-cancel-reservation",
+    )
+    .await;
+    let (request, _receiver) = asked.prompt(0, "first");
+    let kernel = asked.test.kernel.clone();
+    let first = tokio::spawn(async move { kernel.prompt(request).await });
+    hold.entered.notified().await;
+    let key = asked.key(0);
+    asked.test.wait_until(async || {
+        asked.test.sinks.saw(&asked.session, |event| matches!(event,
+            protocol::AgentEventPayload::QueueChanged { pending } if pending.reserved_questions.contains(&key)))
+    }).await;
+    let boundary = asked.test.sinks.events(&asked.session).len();
+    asked
+        .test
+        .kernel
+        .cancel_session(&asked.session)
+        .expect("cancel");
+    hold.release.notify_one();
+    assert!(matches!(
+        first.await.expect("join"),
+        Err(KernelError::PromptCancelled)
+    ));
+    assert!(asked.replies().is_empty());
+    asked.test.wait_until(async || {
+        asked.test.sinks.events(&asked.session)[boundary..].iter().any(|event|
+            matches!(&event.payload, protocol::AgentEventPayload::QueueChanged { pending } if pending.reserved_questions.is_empty()))
+    }).await;
 }
 
 /// Stopping returns a queued answer, and the question opens again.
@@ -637,12 +677,21 @@ async fn queued_answer_survives_reopen() {
     let release = Arc::new(Notify::new());
     let script = Script::which_db(AfterAsk::Hold(Arc::clone(&release)));
     let (asked, run) = Asked::held(script.kernel(), "answer-reopen").await;
-    let (request, receiver) = asked.prompt(0, "postgres");
+    // A long queued answer still occupies just one identity on both sides of recovery.
+    let (request, receiver) = asked.prompt(0, &"p".repeat(64 * 1024));
     drop(receiver);
     assert!(matches!(
         asked.test.kernel.prompt(request).await.expect("answer"),
         PromptOutcome::Queued(_)
     ));
+    assert_eq!(
+        asked
+            .test
+            .kernel
+            .reserved_questions(&asked.session)
+            .unwrap(),
+        [asked.key(0)].into()
+    );
     asked
         .test
         .kernel
@@ -659,6 +708,14 @@ async fn queued_answer_survives_reopen() {
         )
         .await
         .expect("resume Session");
+    assert_eq!(
+        asked
+            .test
+            .kernel
+            .reserved_questions(&asked.session)
+            .unwrap(),
+        [asked.key(0)].into()
+    );
     assert!(is_closed(&asked.answer(0, "again").await, 0));
     let before = asked.test.model.request_count();
     asked
@@ -717,6 +774,16 @@ async fn busy_skip_is_written_before_the_next_model_request() {
         .pending_messages(&asked.session)
         .expect("pending");
     assert!(pending.steering.is_empty() && pending.follow_up.is_empty());
+    let expected = serde_json::json!([asked.key(0)]);
+    assert_eq!(
+        serde_json::to_value(&pending).unwrap()["reservedQuestions"],
+        expected
+    );
+    asked.test.wait_until(async || {
+        asked.test.sinks.saw(&asked.session, |event| matches!(event,
+            protocol::AgentEventPayload::QueueChanged { pending }
+                if serde_json::to_value(pending).unwrap()["reservedQuestions"] == expected))
+    }).await;
     release.notify_one();
     run.await.expect("join").expect("Run");
     let requests = asked.requests();
@@ -727,6 +794,56 @@ async fn busy_skip_is_written_before_the_next_model_request() {
             .iter()
             .any(|message| QuestionReply::try_from(&message.content).is_ok())
     );
+}
+
+/// Dropping a Run before its write-back reopens a held skip for all clients.
+#[tokio::test]
+async fn dropped_run_releases_held_skip() {
+    let release = Arc::new(Notify::new());
+    let script = Script::which_db(AfterAsk::Hold(release));
+    let (asked, run) = Asked::held(script.kernel(), "skip-drop").await;
+    let key = asked.key(0);
+    assert_eq!(asked.dismiss(&[0]).await.unwrap(), 1);
+    asked
+        .test
+        .wait_until(async || {
+            asked.test.sinks.saw(&asked.session, |event| {
+                matches!(
+                    event,
+                    protocol::AgentEventPayload::QueueChanged { pending }
+                        if pending.reserved_questions.contains(&key)
+                )
+            })
+        })
+        .await;
+    let boundary = asked.test.sinks.events(&asked.session).len();
+    run.abort();
+    assert!(run.await.unwrap_err().is_cancelled());
+    assert!(asked.replies().is_empty());
+    assert!(
+        asked
+            .test
+            .kernel
+            .reserved_questions(&asked.session)
+            .unwrap()
+            .is_empty()
+    );
+    asked
+        .test
+        .wait_until(async || {
+            asked.test.sinks.events(&asked.session)[boundary..]
+                .iter()
+                .any(|event| {
+                    matches!(
+                        &event.payload,
+                        protocol::AgentEventPayload::QueueChanged { pending }
+                            if pending.reserved_questions.is_empty()
+                    )
+                })
+        })
+        .await;
+    assert_eq!(asked.dismiss(&[0]).await.unwrap(), 1);
+    assert_eq!(asked.replies(), vec![asked.skip(0)]);
 }
 
 /// A skip during the final Turn is written back at Run close without another model call.

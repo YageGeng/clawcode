@@ -22,10 +22,28 @@ export const EventOrdering = {
   }
 } as const;
 
+/** An image, resource or other ACP block positioned between runs of assistant text. */
+export type MessageAttachment = Readonly<{ textOffset: number; block: Readonly<Record<string, unknown>> }>;
+
+/** One durable answer or skip. Older kernel records may omit the question title. */
+export type QuestionDecision = Readonly<{ id: string; question: string; answer?: string }>;
+
 export type MessageEntity = Readonly<{
   messageId: MessageId;
+  /** Assigned on first insertion and retained when a later frame updates this message. */
+  transcriptOrder?: EventOrder;
   role: "user" | "assistant";
+  /** A user shell operation has its own prompt and tool and does not start an agent Run. */
+  origin?: "user_bash";
   text: string;
+  /** Number of images on a user turn; replay can retain the count without keeping the full base64 payload. */
+  imageCount?: number;
+  /** Offsets into text keep media in wire order without rebuilding previous blocks on token updates. */
+  attachments?: readonly MessageAttachment[];
+  /** The user's recorded choices, in the order they were settled. */
+  decisions?: readonly QuestionDecision[];
+  /** A user decision recorded during ongoing work stays inside the same displayed turn. */
+  continuesTurn?: boolean;
   reasoning: string;
   startedAtMs: TimestampMs;
   endedAtMs: TimestampMs;
@@ -33,7 +51,13 @@ export type MessageEntity = Readonly<{
 
 export type ToolCallEntity = Readonly<{
   toolCallId: ToolCallId;
+  /** The call's position stays fixed when its result arrives. */
+  transcriptOrder?: EventOrder;
   title: string;
+  name?: string;
+  rawInput?: unknown;
+  rawOutput?: unknown;
+  content?: readonly unknown[];
   status: "pending" | "in_progress" | "completed" | "failed" | "cancelled";
   kind?: ToolKind;
   /** The child Session a spawn tool started, once its result names it. */
@@ -41,6 +65,17 @@ export type ToolCallEntity = Readonly<{
   /** The files its `diff` content changed, counted once when the content arrives. */
   changes: readonly FileChange[];
   endedAtMs?: TimestampMs;
+}>;
+
+/** One agent-owned terminal projected by the current Session branch. */
+export type TerminalEntity = Readonly<{
+  terminalId: string;
+  command?: string;
+  cwd?: string;
+  output: string;
+  exitStatus?: Readonly<{ exitCode?: number; signal?: string }>;
+  /** At most three bytes carried into the next chunk when UTF-8 splits across frames. */
+  pendingUtf8?: Uint8Array;
 }>;
 
 /** One file a tool changed, from its diff content. */
@@ -71,6 +106,8 @@ export type PermissionPrompt = Readonly<{
   sessionId: SessionId;
   title: string;
   description?: string;
+  /** The exact Markdown proposal of a switch_mode permission request. */
+  plan?: string;
   options: readonly PermissionOption[];
 }>;
 

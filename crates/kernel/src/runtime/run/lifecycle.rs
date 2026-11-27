@@ -515,9 +515,6 @@ impl Drop for ActiveRunLease {
     /// Clears only the active Run identity installed by this lease.
     fn drop(&mut self) {
         let _ = self.execution.close_queue();
-        // Only here are all of the Run's writes over; `close_queue` also runs
-        // mid-Run on cancel, before an unlocked first-input write can land.
-        let _ = self.execution.clear_reply_keys();
         if let Ok(mut active_run) = self.execution.active_run.lock()
             && active_run
                 .as_ref()

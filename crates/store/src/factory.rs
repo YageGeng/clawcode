@@ -6,7 +6,8 @@ use std::sync::Arc;
 use std::time::UNIX_EPOCH;
 
 use protocol::{
-    Sequence, SessionGitInfo, SessionId, SessionOwnership, TimestampMs,
+    FileApprovalMode, ProductIdentity, Sequence, SessionGitInfo, SessionId,
+    SessionOwnership, TimestampMs,
 };
 use serde::{Deserialize, Serialize};
 
@@ -133,7 +134,7 @@ impl JsonlStoreFactory {
                 .path(path)
                 .clock(Arc::clone(&self.clock))
                 .file(writer)
-                .state(SessionState::new()?)
+                .state(SessionState::new(header.parent_session_id.is_some())?)
                 .sync_observer(self.observer())
                 .build(),
         ))
@@ -224,7 +225,7 @@ impl StoreFactory for JsonlStoreFactory {
             ));
         }
 
-        let mut state = SessionState::new()?;
+        let mut state = SessionState::new(header.parent_session_id.is_some())?;
         let mut repaired = false;
         for (index, line) in lines.iter().enumerate().skip(1) {
             let value = match serde_json::from_str::<serde_json::Value>(line) {
@@ -350,7 +351,19 @@ impl StoreFactory for JsonlStoreFactory {
                 )?;
             }
         }
-        for entry in branch {
+        for mut entry in branch {
+            // A file grant belongs only to its original session incarnation.
+            // Detach it before the first copy hits disk, retaining the entry
+            // and its mode for history even if the fork later fails midway.
+            if entry
+                .is_custom(ProductIdentity::SLUG, FileApprovalMode::CUSTOM_TYPE)
+                && let Some(data) = entry
+                    .payload
+                    .get_mut("data")
+                    .and_then(serde_json::Value::as_object_mut)
+            {
+                data.remove("sessionId");
+            }
             target.append_entry(
                 &options.lane,
                 NewEntry {

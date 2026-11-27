@@ -229,8 +229,36 @@ pub struct ModelProfile {
     pub prompt_cache: Option<crate::PromptCacheRetention>,
 }
 
-/// Current model, thinking level, mode, and the configured models a client may pick.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+/// How one Session handles built-in writes and edits outside its workspace.
+#[derive(
+    Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize,
+)]
+#[serde(rename_all = "snake_case")]
+pub enum FileApprovalMode {
+    /// Use the host's configured tool policy.
+    #[default]
+    Host,
+    /// Ask for each external mutation.
+    Ask,
+    /// Allow external mutations in this Session.
+    Allow,
+}
+
+impl FileApprovalMode {
+    /// The v4 custom entry whose sessionId owns this policy choice.
+    pub const CUSTOM_TYPE: &'static str = "file_approval_mode";
+}
+
+/// Current selections and the configured models a client may pick.
+#[derive(
+    Debug,
+    Clone,
+    PartialEq,
+    Eq,
+    Serialize,
+    Deserialize,
+    typed_builder::TypedBuilder,
+)]
 pub struct SessionSettings {
     /// Model future Turns will use.
     pub model: ModelProfile,
@@ -240,7 +268,12 @@ pub struct SessionSettings {
     pub models: Vec<ModelProfile>,
     /// How freely the agent may act; absent in older payloads means `Default`.
     #[serde(default)]
+    #[builder(default)]
     pub mode: crate::SessionMode,
+    /// External file approval override. Older snapshots use the host default.
+    #[serde(default)]
+    #[builder(default)]
+    pub file_approval: FileApprovalMode,
 }
 
 /// Cause that initiated a context compaction operation.

@@ -16,7 +16,7 @@ use tokio::sync::{Mutex, OwnedMutexGuard};
 use super::path::ResolvedPath;
 use crate::{ToolError, ToolExecutionContext};
 
-/// A mutation's queue key and, for on-request sessions, its approved physical path.
+/// A mutation's queue key and, for guarded saves, its pinned physical path.
 pub(super) struct FileMutation {
     pub(super) path: PathBuf,
     guarded: bool,
@@ -31,11 +31,15 @@ impl FileMutation {
     ) -> Result<Self, ToolError> {
         context.ensure_active()?;
         let path = ResolvedPath::new(input, &context.cwd)?.as_path().to_owned();
-        let Some(approver) = &context.file_mutation_approver else {
-            return Ok(Self {
-                path,
-                guarded: false,
-            });
+        let approver = match &context.file_mutation_approver {
+            Some(approver) if approver.requires_guarded_save(call)? => approver,
+            // Hosts with in-place save semantics keep the original path spelling.
+            _ => {
+                return Ok(Self {
+                    path,
+                    guarded: false,
+                });
+            }
         };
         let cwd = context.cwd.clone();
         let can_create = call.name == "write";

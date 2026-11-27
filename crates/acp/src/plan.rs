@@ -7,8 +7,8 @@ use std::collections::HashSet;
 
 use agent_client_protocol::v2::schema as wire;
 use protocol::{
-    AgentEventPayload, ContentBlock, MessageContent, TODO_WRITE_TOOL,
-    TodoStatus, ToolResultDetails,
+    AgentEventPayload, MessageContent, TODO_WRITE_TOOL, TodoStatus,
+    ToolResultDetails,
 };
 
 /// Stable id of the plan the user last approved; each approval replaces it.
@@ -66,65 +66,70 @@ impl PlanUpdateOf<'_> {
             wire::PlanUpdate::new(content).meta(metadata.clone()),
         ))
     }
+}
 
-    /// Returns whether the result belongs to `todo_write`, which shows no tool card.
-    pub(crate) fn is_todo_list(&self) -> bool {
-        matches!(self.0, Some(ToolResultDetails::TodoList { .. }))
+/// The set of tool updates requested by one ACP client at initialization.
+#[derive(Clone, Copy, Default)]
+pub(crate) struct ToolCallHistory(pub(crate) bool);
+
+impl ToolCallHistory {
+    /// Includes todo tool calls only for clients displaying the full tool history.
+    pub(crate) fn includes(self, update: &wire::SessionUpdate) -> bool {
+        self.0
+            || !matches!(
+                update,
+                wire::SessionUpdate::ToolCallUpdate(call)
+                    if call.name.value().is_some_and(|name| name == TODO_WRITE_TOOL)
+            )
     }
 }
 
-/// Tool calls kept off clients' tool cards because they belong to `todo_write`.
-///
-/// A failed or blocked call carries neither the tool name nor a todo list in its
-/// result, so the call id seen when the call started is what identifies it.
+/// Tracks the identity of todo calls across patches that omit the tool name.
 #[derive(Debug, Default)]
-pub(crate) struct HiddenToolCalls(HashSet<String>);
+pub(crate) struct TodoToolCalls(HashSet<String>);
 
-impl HiddenToolCalls {
-    /// Remembers the `todo_write` calls an event announces and drops every tool
-    /// card update for them, including the one announcing the call; plan
-    /// updates and the rest of the event pass through.
-    pub(crate) fn apply(
+impl TodoToolCalls {
+    /// Names every todo patch before journaling so even a mid-call resume can filter it.
+    pub(crate) fn identify(
         &mut self,
         payload: &AgentEventPayload,
-        updates: &mut Vec<wire::SessionUpdate>,
+        updates: &mut [wire::SessionUpdate],
     ) {
-        match payload {
-            AgentEventPayload::ToolExecutionStart { call, .. }
-                if call.name == TODO_WRITE_TOOL =>
+        // Result details also identify successful calls in partial durable histories.
+        let todo_result = match payload {
+            AgentEventPayload::ToolExecutionEnd { result, .. } => {
+                matches!(
+                    result.details,
+                    Some(ToolResultDetails::TodoList { .. })
+                )
+            }
+            AgentEventPayload::MessageEnd { message } => matches!(
+                message.content,
+                MessageContent::ToolResult {
+                    details: Some(ToolResultDetails::TodoList { .. }),
+                    ..
+                }
+            ),
+            _ => false,
+        };
+        for update in updates {
+            let wire::SessionUpdate::ToolCallUpdate(call) = update else {
+                continue;
+            };
+            if call
+                .name
+                .value()
+                .is_some_and(|name| name == TODO_WRITE_TOOL)
             {
                 self.0.insert(call.tool_call_id.to_string());
+            } else if todo_result || self.0.contains(&*call.tool_call_id.0) {
+                call.name =
+                    agent_client_protocol::schema::MaybeUndefined::Value(
+                        TODO_WRITE_TOOL.to_string(),
+                    );
             }
-            AgentEventPayload::MessageEnd { message } => {
-                if let MessageContent::Assistant { blocks, .. } =
-                    &message.content
-                {
-                    self.0.extend(blocks.iter().filter_map(
-                        |block| match block {
-                            ContentBlock::ToolCall {
-                                tool_call_id,
-                                name,
-                                ..
-                            } if name == TODO_WRITE_TOOL => {
-                                Some(tool_call_id.to_string())
-                            }
-                            _ => None,
-                        },
-                    ));
-                }
-            }
-            _ => {}
         }
-        if !self.0.is_empty() {
-            updates.retain(|update| {
-                !matches!(
-                    update,
-                    wire::SessionUpdate::ToolCallUpdate(update)
-                        if self.0.contains(&*update.tool_call_id.0)
-                )
-            });
-        }
-        // The result message is the call's last update, so forget it after it.
+        // The persisted result message is the final patch, including for blocked calls.
         if let AgentEventPayload::MessageEnd { message } = payload
             && let MessageContent::ToolResult { tool_call_id, .. } =
                 &message.content

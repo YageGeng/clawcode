@@ -1,4 +1,5 @@
 import { Text, View } from "nsh";
+import type { InputRef } from "nsh";
 import { Input as BaseInput } from "nsh/base";
 import type { JSX } from "nsh/jsx-runtime";
 
@@ -65,7 +66,7 @@ export function textareaHeights(minLines = 2, maxLines = 8): Readonly<{ min: num
  * that is its frame (the composer).
  */
 export function Textarea(
-  props: TextControlProps & { minLines?: number; maxLines?: number; onSubmit?: () => void; variant?: "field" | "bare" },
+  props: TextControlProps & { minLines?: number; maxLines?: number; onSubmit?: () => void; inputRef?: (node: InputRef) => void; variant?: "field" | "bare" },
 ) {
   const heights = () => textareaHeights(props.minLines, props.maxLines);
   const look = () =>
@@ -75,6 +76,7 @@ export function Textarea(
   return (
     <BaseInput
       multiline
+      ref={(node) => props.inputRef?.(node)}
       value={props.value}
       placeholder={props.placeholder}
       readonly={props.disabled === true}

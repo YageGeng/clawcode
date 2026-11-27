@@ -360,6 +360,20 @@ where
         &mut ClientSide,
     ) -> Result<(), agent_client_protocol::Error>,
 {
+    with_client_meta(factory, None, body).await;
+}
+
+/// Opens an ACP client with optional product metadata on its initialize request.
+async fn with_client_meta<B>(
+    factory: &Arc<AcpServerFactory>,
+    meta: Option<wire::Meta>,
+    body: B,
+) where
+    B: AsyncFnOnce(
+        &V2ConnectionTo<Agent>,
+        &mut ClientSide,
+    ) -> Result<(), agent_client_protocol::Error>,
+{
     let component = factory.component(AcpTransportKind::Stdio);
     let (updates_tx, updates) = mpsc::unbounded_channel();
     let (asked_tx, asked) = mpsc::unbounded_channel();
@@ -387,10 +401,13 @@ where
         )
         .connect_with(component, async move |connection| {
             connection
-                .send_request(wire::InitializeRequest::new(
-                    ProtocolVersion::V2,
-                    wire::Implementation::new("plan-mode-test", "0.1.0"),
-                ))
+                .send_request(
+                    wire::InitializeRequest::new(
+                        ProtocolVersion::V2,
+                        wire::Implementation::new("plan-mode-test", "0.1.0"),
+                    )
+                    .meta(meta),
+                )
                 .block_task()
                 .await?;
             let mut side = ClientSide { updates, asked };
@@ -855,6 +872,145 @@ async fn blocked_todo_write_is_not_published() {
     .await;
 }
 
+/// Checks the visible lifecycle and contiguous recovery indices up to the idle snapshot.
+async fn assert_todo_history(
+    updates: &mut Updates,
+    id: &str,
+    status: &wire::ToolCallStatus,
+    show_calls: bool,
+) {
+    let mut started = false;
+    let mut result = None;
+    let mut plans = 0;
+    let mut next_index = 0;
+    loop {
+        let notification = tokio::time::timeout(WAIT, updates.recv())
+            .await
+            .expect("timely update")
+            .expect("update stream");
+        let value = json(&notification);
+        if let Some(recovery) = notification
+            .meta
+            .as_ref()
+            .and_then(|meta| meta.get("clawcode"))
+            .and_then(|product| product.get("sessionRecovery"))
+        {
+            assert_eq!(recovery["projectionIndex"], next_index);
+            let count = recovery["projectionCount"].as_u64().expect("count");
+            next_index = (next_index + 1) % count;
+        }
+        if let wire::SessionUpdate::ToolCallUpdate(call) = &notification.update
+            && call.tool_call_id.0.as_ref() == id
+        {
+            assert!(show_calls, "unexpected tool card for {id}");
+            if call.status.value() == Some(&wire::ToolCallStatus::InProgress) {
+                started |=
+                    call.name.value().is_some_and(|name| name == "todo_write")
+                        && call
+                            .raw_input
+                            .value()
+                            .is_some_and(serde_json::Value::is_object);
+            } else if call
+                .raw_output
+                .value()
+                .is_some_and(serde_json::Value::is_object)
+            {
+                result = call.status.value().cloned();
+            }
+        }
+        plans += usize::from(is_plan(&value, "todos"));
+        if matches!(
+            notification.update,
+            wire::SessionUpdate::StateUpdate(wire::StateUpdate::Idle(_))
+        ) {
+            break;
+        }
+    }
+    assert_eq!(next_index, 0, "incomplete recovery group");
+    if show_calls {
+        assert!(started, "missing named tool call and its input for {id}");
+        assert_eq!(result.as_ref(), Some(status), "tool result for {id}");
+    }
+    assert_eq!(
+        plans,
+        usize::from(*status == wire::ToolCallStatus::Completed)
+    );
+}
+
+/// An opted-in client sees successful and failed todo calls live and across both replay sources.
+#[tokio::test]
+async fn opted_in_todo_history_includes_inputs_and_results() {
+    for (text, block_todos, id, status) in [
+        ("todo", false, "call-todo", wire::ToolCallStatus::Completed),
+        (
+            "todo bad",
+            false,
+            "call-todo-bad",
+            wire::ToolCallStatus::Failed,
+        ),
+        ("todo", true, "call-todo", wire::ToolCallStatus::Failed),
+    ] {
+        let root = tempfile::tempdir().expect("root");
+        let policy = ToolPolicy {
+            block_todos,
+            rewrite_plan: false,
+        };
+        let (_kernel, acp) = server(root.path(), policy.clone());
+        let workspace = root.path().to_path_buf();
+        let meta = Some(wire::Meta::from_iter([(
+            "clawcode".to_string(),
+            serde_json::json!({"toolCallHistory": true}),
+        )]));
+        let mut id_created = None;
+        with_client_meta(&acp, meta.clone(), async |connection, side| {
+            let created = connection
+                .send_request(wire::NewSessionRequest::new(workspace.clone()))
+                .block_task()
+                .await?;
+            connection
+                .send_request(prompt(&created.session_id, text))
+                .block_task()
+                .await?;
+            assert_todo_history(&mut side.updates, id, &status, true).await;
+            id_created = Some(created.session_id);
+            Ok(())
+        })
+        .await;
+        let created = id_created.expect("session created");
+
+        // A fresh factory has no retained journal and must replay the persisted messages.
+        let (_reopened, reopened) = server(root.path(), policy);
+        for (factory, client_meta) in [
+            (&acp, None),
+            (&acp, meta.clone()),
+            (&reopened, None),
+            (&reopened, meta),
+        ] {
+            let show_calls = client_meta.is_some();
+            with_client_meta(factory, client_meta, async |connection, side| {
+                connection
+                        .send_request(
+                            wire::ResumeSessionRequest::new(
+                                created.clone(),
+                                workspace.clone(),
+                            )
+                            .replay_from(
+                                wire::ReplayFrom::from(
+                                    wire::ReplayFromStart::new(),
+                                ),
+                            ),
+                        )
+                        .block_task()
+                        .await?;
+                assert_todo_history(&mut side.updates, id, &status, show_calls)
+                    .await;
+                Ok(())
+            })
+            .await;
+        }
+    }
+}
+
 /// A subagent's todo list stays in the subagent's own update stream.
 #[tokio::test]
 async fn subagent_todos_stay_in_the_child() {
@@ -1290,11 +1446,14 @@ async fn file_permissions_survive_disconnect_and_can_be_approved_after_resume()
 /// The Never policy allows both external tools to finish without an ACP permission request.
 #[tokio::test]
 async fn never_policy_runs_external_file_changes_without_a_prompt() {
+    use std::io::Read as _;
+
     let root = tempfile::tempdir().expect("root");
     let workspace = root.path().join("workspace");
     let existing = root.path().join("existing");
     std::fs::create_dir(&workspace).expect("workspace");
     std::fs::write(&existing, "before").expect("original text");
+    let mut reader = std::fs::File::open(&existing).expect("open original");
     let (_, acp) = server_with_approval(
         root.path(),
         no_policy(),
@@ -1319,11 +1478,133 @@ async fn never_policy_runs_external_file_changes_without_a_prompt() {
             std::fs::read_to_string(&existing).expect("edited"),
             "after"
         );
+        // A host configured for in-place edits keeps existing readers attached to the file.
+        let mut contents = String::new();
+        reader
+            .read_to_string(&mut contents)
+            .expect("original reader");
+        assert_eq!(contents, "after");
         assert_eq!(
             std::fs::read_to_string(root.path().join("new/target"))
                 .expect("written"),
             "written"
         );
+        Ok(())
+    })
+    .await;
+}
+
+/// Changes only the selected Session's external file approval preference.
+fn file_approval_mode(
+    session: &wire::SessionId,
+    value: &str,
+) -> wire::SetSessionConfigOptionRequest {
+    wire::SetSessionConfigOptionRequest::new(
+        session.clone(),
+        "file_approval",
+        wire::SessionConfigOptionValue::id(value),
+    )
+}
+
+/// A Session-local grant applies to external tools while another Session still asks before writing.
+#[tokio::test]
+async fn session_file_approval_is_isolated_and_does_not_grant_plans() {
+    let temp = tempfile::tempdir().expect("root");
+    let root = temp.path().canonicalize().expect("absolute root");
+    let workspace = root.join("work");
+    std::fs::create_dir(&workspace).expect("workspace");
+    std::fs::write(root.join("existing"), "before").expect("original");
+    let (_, acp) = server(&root, no_policy());
+    with_client(&acp, async |connection, side| {
+        let session = connection
+            .send_request(wire::NewSessionRequest::new(&workspace))
+            .block_task()
+            .await?
+            .session_id;
+        connection
+            .send_request(file_approval_mode(&session, "allow"))
+            .block_task()
+            .await?;
+        connection
+            .send_request(prompt(&session, "change external files"))
+            .block_task()
+            .await?;
+        wait_idle(&mut side.updates).await;
+        assert_eq!(
+            std::fs::read_to_string(root.join("new/target")).unwrap(),
+            "written"
+        );
+        assert_eq!(
+            std::fs::read_to_string(root.join("existing")).unwrap(),
+            "after"
+        );
+        assert!(matches!(
+            side.asked.try_recv(),
+            Err(mpsc::error::TryRecvError::Empty)
+        ));
+
+        connection
+            .send_request(set_mode(&session, "plan"))
+            .block_task()
+            .await?;
+        let _plan = connection.send_request(prompt(&session, "plan it"));
+        let (request, answer) = next_asked(side).await;
+        assert_eq!(request.title, "Ready to execute the plan?");
+        answer.respond(selected("keep_planning"))?;
+        wait_idle(&mut side.updates).await;
+
+        let other = connection
+            .send_request(wire::NewSessionRequest::new(&workspace))
+            .block_task()
+            .await?
+            .session_id;
+        std::fs::write(root.join("existing"), "before").unwrap();
+        connection
+            .send_request(prompt(&other, "change external files"))
+            .block_task()
+            .await?;
+        for (_, answer) in file_requests(side, &root).await {
+            answer.respond(selected("reject_once"))?;
+        }
+        wait_idle(&mut side.updates).await;
+        assert_eq!(
+            std::fs::read_to_string(root.join("existing")).unwrap(),
+            "before"
+        );
+        Ok(())
+    })
+    .await;
+}
+
+/// A user may require a prompt even on a host configured to run these tools without asking.
+#[tokio::test]
+async fn session_file_approval_can_require_prompts_on_a_never_host() {
+    let temp = tempfile::tempdir().expect("root");
+    let root = temp.path().canonicalize().unwrap();
+    let workspace = root.join("work");
+    std::fs::create_dir(&workspace).unwrap();
+    std::fs::write(root.join("existing"), "before").unwrap();
+    let (_, acp) =
+        server_with_approval(&root, no_policy(), config::AskForApproval::Never);
+    with_client(&acp, async |connection, side| {
+        let session = connection
+            .send_request(wire::NewSessionRequest::new(workspace))
+            .block_task()
+            .await?
+            .session_id;
+        connection
+            .send_request(file_approval_mode(&session, "ask"))
+            .block_task()
+            .await?;
+        connection
+            .send_request(prompt(&session, "change external files"))
+            .block_task()
+            .await?;
+        for (_, answer) in file_requests(side, &root).await {
+            answer.respond(selected("reject_once"))?;
+        }
+        wait_idle(&mut side.updates).await;
+        assert!(!root.join("new").exists());
         Ok(())
     })
     .await;
