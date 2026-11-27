@@ -542,10 +542,10 @@ stops remove the failed Assistant from active context and compact-and-retry at
 most once. The former Turn-count compaction fields are not backward compatible.
 
 Provider adapters use the crates.io releases of `rig-core` and `rig-reqwest`
-pinned to `0.46` (`>=0.46.0, <0.47.0`), so `cargo update` only admits 0.46.x
+pinned to `0.47` (`>=0.47.0, <0.48.0`), so `cargo update` only admits 0.47.x
 patch releases. `Cargo.lock` records the versions validated for this application.
 Pre-1.0 minor releases may change the API and the serialized native Assistant
-message stored in session files, so moving to 0.47 or later is an explicit range
+message stored in session files, so moving to 0.48 or later is an explicit range
 change for both crates together, followed by the workspace tests and Clippy. A
 stored native message the current build cannot read is dropped on load: that
 Assistant replays from its displayed content, and a debug log records the fallback.

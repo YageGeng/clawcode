@@ -466,10 +466,10 @@ Assistant。树导航生成的分支摘要会在 `context_tokens` 减去
 Assistant 的活动上下文，压缩后最多恢复一次。旧版按 Turn 数保留的 compaction 字段
 不兼容。
 
-Provider 适配层使用 crates.io 的 `rig-core` 与 `rig-reqwest`，锁定在 `0.46`
-（`>=0.46.0, <0.47.0`），因此 `cargo update` 只接受 0.46.x 补丁版本。`Cargo.lock`
+Provider 适配层使用 crates.io 的 `rig-core` 与 `rig-reqwest`，锁定在 `0.47`
+（`>=0.47.0, <0.48.0`），因此 `cargo update` 只接受 0.47.x 补丁版本。`Cargo.lock`
 记录了本应用验证过的版本。1.0 之前的次版本可能改变 API 与 Session 文件中保存的
-原生 Assistant 消息，因此升级到 0.47 或更高版本是对两个 crate 一起的显式范围变更，
+原生 Assistant 消息，因此升级到 0.48 或更高版本是对两个 crate 一起的显式范围变更，
 完成后再运行 workspace 测试与 Clippy。模型输入能力优先取配置，其次取 rig 目录。
 每个请求都会构建上游模型；HTTP 连接池共享，每个 provider 的多个模型共享同一个
 authenticator。

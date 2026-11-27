@@ -2,7 +2,7 @@
 
 Extension 采用强类型注册：每个 Hook Point 固定自己的事件和返回类型，模块只能通过 `ExtensionRegistrar::on` 注册。Kernel 为每个 Session 创建独立 Runtime，因此 Handler 不应保存跨 Session 的可变状态；需要持久化时应使用 `ExtensionContext` 的 Host 能力。
 
-完整可编译示例位于 `crates/extensions/examples/hooks.rs`，并复用 `crates/extensions/src/available/hook_examples/` 中的正式扩展源码。可用以下命令验证：
+完整可编译示例位于 `extensions/examples/hooks.rs`，并复用 `extensions/src/available/hook_examples/` 中的正式扩展源码。可用以下命令验证：
 
 ```bash
 rtk cargo check -p extensions --example hooks
@@ -10,7 +10,7 @@ rtk cargo check -p extensions --example hooks
 
 ## 静态编译与加载
 
-`crates/extensions/build.rs` 默认读取项目根目录的 `claw.toml`。配置顺序同时决定编译内容和 Hook 注册顺序：
+`extensions/build.rs` 默认读取项目根目录的 `claw.toml`。配置顺序同时决定编译内容和 Hook 注册顺序：
 
 ```toml
 [extensions]
@@ -45,7 +45,7 @@ impl ExtensionModule for MyExtension {
 }
 ```
 
-## 33 个非 UI Hook
+## 31 个非 UI Hook
 
 | 领域 | Hook | 行为 |
 | --- | --- | --- |
@@ -57,6 +57,7 @@ impl ExtensionModule for MyExtension {
 | Session | `session_before_fork` | Fork 前可取消，并可跳过对话恢复。 |
 | Session | `session_before_compact` | Compaction 前可取消或提供完整结果。 |
 | Session | `session_compact` | Compaction 持久化完成后的观察点。 |
+| Session | `session_compact_failed` | Compaction 失败或中止后的观察点。 |
 | Session | `session_before_tree` | Tree 导航前可取消、提供 Summary 或修改 Summary 指令。 |
 | Session | `session_tree` | Tree 导航完成后的观察点。 |
 | Session | `session_shutdown` | Runtime 失效前的最后观察点。 |
@@ -71,9 +72,6 @@ impl ExtensionModule for MyExtension {
 | Message | `message_update` | 接收强类型 Text、Reasoning 或 Tool Call 增量。 |
 | Message | `message_end` | 持久化前可替换完整消息，但应保留身份和角色。改了身份时恢复原身份并保留替换内容；改了角色时丢弃本次替换。两种情况都会上报诊断，Run 继续。 |
 | Context | `context` | 仅替换本次 Provider 请求的上下文，不修改持久化历史。 |
-| Provider | `before_provider_request` | Provider 私有 JSON Body 序列化后可整体替换。 |
-| Provider | `before_provider_headers` | 最终 Header 组装后按顺序 Set/Remove。 |
-| Provider | `after_provider_response` | HTTP 响应或 WebSocket 握手元数据可用时触发。 |
 | Model | `model_select` | 模型设置、循环或恢复后触发。 |
 | Model | `thinking_level_select` | Thinking Level 设置并按模型能力收敛后触发。 |
 | Tool | `tool_execution_start` | Tool 参数完成变换和校验、即将执行时触发。 |
@@ -82,6 +80,16 @@ impl ExtensionModule for MyExtension {
 | Tool | `tool_call` | 校验前继续、替换参数或阻止 Tool Call。 |
 | Tool | `tool_result` | 持久化前替换 Blocks、Details、错误状态或 Usage。 |
 | Tool | `user_bash` | 拦截服务器端 `!`/`!!`；首个完整替代结果生效，否则使用 Built-in Bash 的执行器。 |
+
+## Provider HTTP 中间件
+
+原 `before_provider_request`、`before_provider_headers`、`after_provider_response` 三个 Hook 点及 Header 白名单已移除。Provider 层拦截统一通过 `ExtensionRegistrar::register_http_middleware` 注册 `extension::http_client::middleware::HttpMiddleware` 工厂实现：
+
+```rust
+registrar.register_http_middleware(|context| ProviderPolicy { context })
+```
+
+工厂接收当前请求的 `ExtensionContext`，在每次请求尝试时执行，可检查并修改完整 Header、原始 Body 与响应（包括认证头）；认证流量本身继续使用基础 transport。完整示例参见 `extensions/src/available/hook_examples/provider.rs`。
 
 ## Prompt 相关 Hook 数据
 
@@ -99,7 +107,7 @@ Handler 可返回新的 `BeforeAgentStartResult.system_prompt`，后续 Handler 
 ## 组合与失败规则
 
 - 观察点按注册顺序运行，返回 `()`。
-- `input`、`before_agent_start`、`context`、Provider Patch 和 Tool Patch 会按注册顺序组合，后续 Handler 看到前序结果。
+- `input`、`before_agent_start`、`context` 和 Tool Patch 会按注册顺序组合，后续 Handler 看到前序结果；Provider 的 `HttpMiddleware` 同样按注册顺序挂载到传输层。
 - Session 取消点和 `tool_call` 的 Block 会提前停止对应操作。
 - `user_bash` 使用首个 `Some(UserBashResult)`；`None` 表示继续查找，全部为 `None` 时执行本地 Shell。
 - 普通 Handler 错误会写入 Extension 诊断消息；安全关键的 Tool Call 预处理失败会关闭执行。
@@ -112,4 +120,4 @@ Session 切换、创建、Fork 和 Tree 导航只在 `ExtensionCommandContext` �
 
 User Bash 始终在服务器执行，不使用 ACP Client Terminal callback。`!` 的结果持久化并进入后续模型上下文；`!!` 同样持久化和回放，但不会发送给模型。ACP 通过产品命名空间下的 `session/bash` 扩展方法调用同一 Kernel 路径。
 
-`hook-examples` 覆盖其中 31 个观察或变换接入点；`command-guard` 独立提供 `tool_call` 和 `user_bash` 两个安全策略示例，避免危险命令规则在多个扩展中重复定义。
+`hook-examples` 覆盖其中 29 个观察或变换接入点以及 `HttpMiddleware` 示例；`command-guard` 独立提供 `tool_call` 和 `user_bash` 两个安全策略示例，避免危险命令规则在多个扩展中重复定义。
