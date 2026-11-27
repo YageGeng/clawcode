@@ -7,12 +7,15 @@ import arrowRight from "../../assets/icons/arrow-right.svg";
 import arrowUp from "../../assets/icons/arrow-up.svg";
 import check from "../../assets/icons/check.svg";
 import fileText from "../../assets/icons/file-text.svg";
+import fileDiff from "../../assets/icons/file-diff.svg";
+import panelRight from "../../assets/icons/panel-right.svg";
 import panelLeft from "../../assets/icons/panel-left.svg";
 import pencil from "../../assets/icons/pencil.svg";
 import square from "../../assets/icons/square.svg";
 import squarePen from "../../assets/icons/square-pen.svg";
 import terminal from "../../assets/icons/terminal.svg";
 import chevronDown from "../../assets/icons/chevron-down.svg";
+import chevronLeft from "../../assets/icons/chevron-left.svg";
 import chevronRight from "../../assets/icons/chevron-right.svg";
 import circleAlert from "../../assets/icons/circle-alert.svg";
 import circleCheck from "../../assets/icons/circle-check.svg";
@@ -22,6 +25,7 @@ import folder from "../../assets/icons/folder.svg";
 import hand from "../../assets/icons/hand.svg";
 import info from "../../assets/icons/info.svg";
 import laptop from "../../assets/icons/laptop.svg";
+import link from "../../assets/icons/link.svg";
 import loaderCircle from "../../assets/icons/loader-circle.svg";
 import moon from "../../assets/icons/moon.svg";
 import pin from "../../assets/icons/pin.svg";
@@ -42,12 +46,15 @@ const icons = {
   "arrow-up": arrowUp,
   check,
   "file-text": fileText,
+  "file-diff": fileDiff,
   "panel-left": panelLeft,
+  "panel-right": panelRight,
   pencil,
   square,
   "square-pen": squarePen,
   terminal,
   "chevron-down": chevronDown,
+  "chevron-left": chevronLeft,
   "chevron-right": chevronRight,
   "circle-alert": circleAlert,
   "circle-check": circleCheck,
@@ -57,6 +64,7 @@ const icons = {
   hand,
   info,
   laptop,
+  link,
   "loader-circle": loaderCircle,
   moon,
   pin,

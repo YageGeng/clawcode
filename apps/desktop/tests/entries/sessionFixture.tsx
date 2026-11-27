@@ -14,10 +14,12 @@ export function mountSession(setup: (agent: ScriptedAgent) => void, opened?: (ag
     const agent = new ScriptedAgent([{ sessionId: "s1", cwd: "/work/alpha", title: "Fix the build" }]);
     setup(agent);
     const store = createAppStore([createHostStore(LOCAL_HOST, agent.transport)]);
+    // JSX props are getters; the open session must retain its settings across menu changes.
+    const settings = createSettingsStore();
     void store.start().then(async () => {
       store.openSession(LOCAL_HOST.id, "s1" as SessionId);
       opened?.(agent);
     });
-    return <Shell store={store} settings={createSettingsStore()} />;
+    return <Shell store={store} settings={settings} />;
   });
 }

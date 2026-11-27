@@ -67,6 +67,7 @@ test("answer_is_the_last_assistant_message_of_an_ended_turn", () => {
   expect(turns.length).toBe(1);
   const turn = turns[0]!;
   expect(turn.userMessageId).toBe("u1");
+  expect(turn.lineCounts).toEqual({ added: 0, removed: 0 });
   expect(workSteps(turn)).toEqual([{ type: "message", key: "message:a1", messageId: "a1" }, { type: "tool", key: "tool:t1", toolCallId: "t1" }]);
   expect(turn.sections.at(-1)?.key).toBe("answer:a2");
   expect(turn.running).toBe(false);
@@ -97,6 +98,7 @@ test("file_changes_count_lines_per_path", () => {
     message("a1", "assistant", "done", 9),
   ]));
   expect(turns[0]!.changes.map(({ edits, ...counts }) => counts)).toEqual([{ path: "src/a.rs", added: 5, removed: 1 }, { path: "src/b.rs", added: 4, removed: 0 }]);
+  expect(turns[0]!.lineCounts).toEqual({ added: 9, removed: 1 });
   expect(turns[0]!.changes[0]!.edits.map((edit) => edit.diff)).toEqual([
     { oldText: "x\ny", newText: "x\nA\nB\nC" }, { oldText: "keep\n", newText: "keep\nD\nE" },
   ]);

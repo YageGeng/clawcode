@@ -7,11 +7,17 @@ import { type } from "./tokens";
 import { motionClass } from "./motion";
 
 /** An empty state: what is missing and the action that fills it. */
-export function Empty(props: { title: string; description?: string; icon?: IconName; action?: JSX.Element }) {
+export function Empty(props: { title: string; description?: string; icon?: IconName; action?: JSX.Element; class?: string }) {
   return (
-    <View class="items-center justify-center gap-2 p-8">
-      <If when={props.icon}>{(icon) => <Icon name={icon()} color="muted-foreground" />}</If>
-      <Text class={`${type.ui} font-medium text-foreground`}>{props.title}</Text>
+    <View class={`items-center justify-center gap-2 p-6 ${props.class ?? ""}`}>
+      <If when={props.icon}>
+        {(icon) => (
+          <View class="mb-0.5 size-9 items-center justify-center rounded-(--radius) bg-muted/70">
+            <Icon name={icon()} color="muted-foreground" />
+          </View>
+        )}
+      </If>
+      <Text class={`${type.ui} font-medium text-foreground text-center`}>{props.title}</Text>
       <If when={props.description}>{(text) => <Text class={`${type.meta} text-muted-foreground text-center`}>{text()}</Text>}</If>
       {props.action}
     </View>

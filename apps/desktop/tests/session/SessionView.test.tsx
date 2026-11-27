@@ -76,21 +76,39 @@ test("streaming_reply_stays_visible_while_work_is_folded", async () => {
 
 test("file_changes_and_native_diff_start_closed", async () => {
   const app = await openEntry("session-changes");
-  await app.waitFor("label:Changed files (1)");
+  await app.waitFor("label:1 file changed");
+  expect(app.accessibility("label:1 file changed")?.expanded).toBe(false);
   expect(app.texts()).not.toContain("Edited src/a.rs");
-  await app.press("label:Changed files (1)");
+  await app.press("label:1 file changed");
   await app.waitFor("text:Edited src/a.rs");
+  expect(app.accessibility("label:1 file changed")?.expanded).toBe(true);
   await app.waitFor("text:+3");
   await app.press("label:View changes to src/a.rs");
   await app.waitFor("text:src/a.rs");
   await app.waitFor("text:const MAX_RETRIES: u8 = 8;");
-  await app.press("label:Close changes");
+  await app.press("label:Close workspace panel");
   expect(app.shows("text:src/a.rs")).toBe(false);
+});
+
+test("review_opens_the_folded_turn_and_keeps_the_edit_being_read", async () => {
+  const app = await openEntry("session-changes", { height: 1000 });
+  await app.waitFor("label:2 files changed >> text:+3");
+  await app.waitFor("label:2 files changed >> text:−2");
+  await app.press("label:Review >> nth=0");
+  await app.waitFor("text:use first;");
+  expect(app.shows("label:View changes to tests/a.rs")).toBe(false);
+  await app.press("label:Next edit");
+  await app.press("label:Review >> nth=0");
+  await app.waitFor("text:use second;");
+  await app.press("label:Review >> nth=1");
+  await app.waitFor("text:const MAX_RETRIES: u8 = 8;");
+  await app.press("label:Close workspace panel");
+  expect(app.shows("text:Edited src/a.rs")).toBe(false);
 });
 
 test("the_inspector_follows_the_clicked_path_and_turn_and_keeps_each_recorded_edit", async () => {
   const app = await openEntry("session-changes", { height: 1000 });
-  await app.press("label:Changed files (2)");
+  await app.press("label:2 files changed");
   await app.press("label:View changes to src/a.rs");
   await app.waitFor("text:Turn 1");
   await app.waitFor("text:use first;");
@@ -100,21 +118,21 @@ test("the_inspector_follows_the_clicked_path_and_turn_and_keeps_each_recorded_ed
   await app.press("label:View changes to tests/a.rs");
   await app.waitFor("text:fn test_only() {}");
   expect(app.shows("label:Next edit")).toBe(false);
-  await app.press("label:Changed files (1)");
+  await app.press("label:1 file changed");
   await app.press("label:View changes to src/a.rs >> nth=1");
   await app.waitFor("text:const MAX_RETRIES: u8 = 8;");
   await app.waitFor("text:Turn 2");
   await app.press("text:Settings");
   await app.waitFor("label:Close");
   await app.keyboard.press("Escape");
-  await app.waitFor("label:Close changes");
+  await app.waitFor("label:Close workspace panel");
   expect(app.shows("label:Close")).toBe(false);
   expect(app.shows("text:use first;")).toBe(false);
 });
 
 test("live_tool_updates_preserve_the_selected_edit_its_counts_and_its_scroll_offset", async () => {
   const app = await openEntry("session-change-updates");
-  await app.press("label:Changed files (1)");
+  await app.press("label:1 file changed");
   await app.press("label:View changes to review.ts");
   await app.waitFor("text:Edit 1 of 3");
   await app.waitFor("label:182 lines added, 1 removed");
@@ -147,7 +165,7 @@ test("live_tool_updates_preserve_the_selected_edit_its_counts_and_its_scroll_off
 test("closing_a_narrow_inspector_returns_to_the_expanded_card_and_unsent_draft", async () => {
   const app = await openEntry("session-changes", { width: 800 });
   await app.type("label:Message", "Keep this draft");
-  await app.press("label:Changed files (1)");
+  await app.press("label:1 file changed");
   await app.press("label:View changes to src/a.rs");
   await app.waitFor("text:src/a.rs");
   await app.keyboard.press("Escape");

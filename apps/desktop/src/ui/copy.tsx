@@ -4,7 +4,7 @@ import { t } from "nsh/i18n";
 
 import { IconButton } from "./button";
 import type { ControlSize } from "./button";
-import { type } from "./tokens";
+import { inlineLabel, type } from "./tokens";
 
 /** How the copy control reports each result until its normal label returns. */
 const feedback = {
@@ -35,7 +35,7 @@ export function CopyButton(props: { text: string; label?: string; size?: Control
       />
       {/* Wayland acknowledges the request; the action label already conveys this to screen readers. */}
       <If when={status() === "requested"}>
-        <Text accessibilityElementsHidden class={`${type.meta} text-muted-foreground`}>{t("common.copyRequested")}</Text>
+        <Text accessibilityElementsHidden class={`${inlineLabel} ${type.meta} text-muted-foreground`}>{t("common.copyRequested")}</Text>
       </If>
     </View>
   );

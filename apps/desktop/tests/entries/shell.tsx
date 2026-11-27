@@ -33,6 +33,7 @@ function Entry() {
   const remote = createHostStore({ id: "workstation", name: "Workstation", kind: "remote" }, new ScriptedAgent([]).transport);
   const store = createAppStore([createHostStore(LOCAL_HOST, agent.transport), remote]);
   const settings = createSettingsStore();
+  void settings.load();
   void store.start().then(() => agent.push(agent.state("s2", "running")));
   return <Shell store={store} settings={settings} />;
 }

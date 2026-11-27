@@ -9,7 +9,7 @@ import { Icon } from "./icon";
 import type { IconName } from "./icon";
 import { motion, motionClass } from "./motion";
 import type { Tone } from "./tokens";
-import { toneToken, type } from "./tokens";
+import { inlineLabel, toneToken, type } from "./tokens";
 
 /** What a toast says. */
 export type ToastMessage = Readonly<{ title: string; description?: string; tone?: Tone }>;
@@ -101,12 +101,14 @@ function ToastCard(props: { entry: ToastEntry; onDismiss: () => void }) {
       startingClass={motionClass.toastStarting}
       endingClass={motionClass.toastEnding}
     >
-      <Icon name={toneIcon[tone()]} color={toneToken[tone()]} />
+      <View class="h-5 shrink-0 items-center justify-center">
+        <Icon name={toneIcon[tone()]} color={toneToken[tone()]} />
+      </View>
       <View class="flex-1 gap-0.5">
-        <Text class={`${type.ui} font-medium text-popover-foreground`}>{message().title}</Text>
+        <Text class={`${inlineLabel} ${type.ui} font-medium text-popover-foreground`}>{message().title}</Text>
         <If when={message().description}>{(text) => <Text class={`${type.meta} text-muted-foreground`}>{text()}</Text>}</If>
       </View>
-      <IconButton icon="x" label={t("common.dismiss")} size="sm" onPress={props.onDismiss} />
+      <IconButton icon="x" label={t("common.dismiss")} size="sm" class="-my-0.5" onPress={props.onDismiss} />
     </BaseToast>
   );
 }

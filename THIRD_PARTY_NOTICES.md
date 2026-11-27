@@ -28,6 +28,13 @@ THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR IMPLI
 
 </details>
 
+## Catppuccin desktop file icons
+
+The desktop client includes file and folder icons and filename associations from
+[Catppuccin for VS Code Icons](https://github.com/catppuccin/vscode-icons).
+Copyright (c) 2023 Catppuccin and (c) 2023 thang-nm.
+The desktop bundle includes the [MIT license](./apps/desktop/LICENSES/catppuccin-vscode-icons-MIT.txt).
+
 ## OpenAI Codex agent nickname list
 
 `crates/protocol/assets/agent_names.txt` is copied from `openai/codex`

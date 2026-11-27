@@ -2,15 +2,14 @@ import { computed, untracked, View } from "nsh";
 import { t } from "nsh/i18n";
 
 import type { MessageId, ToolCallId } from "../client/acp/protocol";
-import type { FileChange, MessageEntity, TerminalEntity, ToolCallEntity } from "../client/domain/model";
+import type { MessageEntity, TerminalEntity, ToolCallEntity } from "../client/domain/model";
 import type { TurnView, WorkStep } from "../client/turns";
 import { MessageBubble } from "../ui/bubble";
 import { Disclosure } from "../ui/disclosure";
 import { Markdown } from "../ui/markdown";
 import { motionClass } from "../ui/motion";
-import { ChangeCard } from "./ChangeCard";
+import { TurnChanges, type ViewTurnChange } from "./ChangeCard";
 import { MessageActions } from "./MessageActions";
-import type { ChangeOpener } from "./SessionView";
 import { AssistantContent } from "./ToolContent";
 import { ToolRow } from "./ToolRow";
 
@@ -109,7 +108,7 @@ export function TurnRow(props: {
   turn: TurnView;
   source: TurnSource;
   selectedPath?: string;
-  onViewChange: (turnKey: string, file: FileChange, trigger?: ChangeOpener) => void;
+  onViewChange: ViewTurnChange;
 }) {
   const changesKey = () => `files:${props.turn.key}`;
   const lastWork = computed(() => props.turn.sections.findLast((section) => section.type === "work")?.key);
@@ -144,18 +143,8 @@ export function TurnRow(props: {
         }}
       </Each>
       <If when={props.turn.changes.length > 0}>
-        <Disclosure flush label={t("turn.changedFiles", { count: props.turn.changes.length })} open={props.source.isOpen(changesKey())}
-          onToggle={() => props.source.toggle(changesKey())}>
-          <Each of={props.turn.changes} key={(change) => change.path}>
-            {(change) => (
-              <ChangeCard
-                change={change()}
-                selected={props.selectedPath === change().path}
-                onOpen={(trigger) => props.onViewChange(props.turn.key, change(), trigger)}
-              />
-            )}
-          </Each>
-        </Disclosure>
+        <TurnChanges turn={props.turn} selectedPath={props.selectedPath} open={props.source.isOpen(changesKey())}
+          onToggle={() => props.source.toggle(changesKey())} onViewChange={props.onViewChange} />
       </If>
     </View>
   );

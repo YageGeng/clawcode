@@ -21,6 +21,8 @@ export type TurnView = Readonly<{
   sections: readonly TurnSection[];
   /** Changed files merged per path, in first-seen order. */
   changes: readonly FileChange[];
+  /** Cumulative lines added and removed by all recorded edits in this turn. */
+  lineCounts: Pick<FileChange, "added" | "removed">;
   running: boolean;
   /** The last entry's end minus the user message's start, once the turn ended. */
   durationMs?: number;
@@ -121,11 +123,19 @@ function foldTurn(session: SessionWorkspaceState, turn: Collecting, index: numbe
     }
   }
   flushWork();
+  const files: FileChange[] = [];
+  const lineCounts = { added: 0, removed: 0 };
+  for (const [path, counts] of changes) {
+    files.push({ path, ...counts });
+    lineCounts.added += counts.added;
+    lineCounts.removed += counts.removed;
+  }
   return {
     key,
     ...(turn.userMessageId === undefined ? {} : { userMessageId: turn.userMessageId }),
     sections,
-    changes: [...changes].map(([path, counts]) => ({ path, ...counts })),
+    changes: files,
+    lineCounts,
     running,
     ...(running ? {} : durationOf(session, turn)),
   };

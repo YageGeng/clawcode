@@ -12,7 +12,7 @@ import type { JSX } from "nsh/jsx-runtime";
 import { Icon } from "./icon";
 import type { IconColor, IconName } from "./icon";
 import { motionClass } from "./motion";
-import { type } from "./tokens";
+import { inlineLabel, type } from "./tokens";
 
 /** The one popup surface menus, popovers and selects share (spec §5.1: one popover look); opens and closes immediately without fade. */
 export const popupSurface = "rounded-(--radius-lg) border border-border bg-popover p-1.5 shadow-lg";
@@ -41,7 +41,7 @@ export function Menu(props: {
 }
 
 /** The row every menu item and submenu trigger shares. */
-const itemRow = `min-h-8 flex-row items-center gap-2.5 rounded-(--radius) px-2.5 py-1.5 focus:bg-accent hover:bg-accent disabled:opacity-50 ${motionClass.wash}`;
+const itemRow = `min-h-8 flex-row gap-2.5 rounded-(--radius) px-2.5 py-1.5 focus:bg-accent hover:bg-accent disabled:opacity-50 ${motionClass.wash}`;
 
 /**
  * One command of a `Menu`. `danger` for destructive commands (red), `warning` for risky but non-destructive
@@ -64,17 +64,26 @@ export function MenuItem(props: {
       : props.warning === true
         ? { text: "text-warning", icon: "warning" }
         : { text: "text-popover-foreground", icon: "foreground" };
+  // Multi-line items anchor leading/trailing icons to the 20pt title line rather than the multi-line midpoint.
+  const multiline = () => props.description !== undefined;
   return (
-    <BaseMenuItem disabled={props.disabled === true} checked={props.checked} onSelect={props.onSelect} class={itemRow}>
-      <If when={props.icon}>{(icon) => <Icon name={icon()} size="md" color={tone().icon} />}</If>
+    <BaseMenuItem disabled={props.disabled === true} checked={props.checked} onSelect={props.onSelect}
+      class={`${itemRow} ${multiline() ? "items-start" : "items-center"}`}>
+      <If when={props.icon}>
+        {(icon) => (
+          <View class={multiline() ? "h-5 shrink-0 items-center justify-center" : "shrink-0"}>
+            <Icon name={icon()} size="md" color={tone().icon} />
+          </View>
+        )}
+      </If>
       <View class="flex-1 gap-0.5">
-        <Text class={`${type.ui} ${tone().text}`}>{props.label}</Text>
+        <Text class={`${inlineLabel} ${type.ui} ${tone().text}`}>{props.label}</Text>
         <If when={props.description}>
           {(text) => <Text class={`${type.meta} ${props.warning === true || props.danger === true ? tone().text : "text-muted-foreground"}`}>{text()}</Text>}
         </If>
       </View>
-      <If when={props.shortcut}>{(keys) => <Text class={`${type.meta} text-muted-foreground`}>{keys()}</Text>}</If>
-      <View class="size-4 items-center justify-center">
+      <If when={props.shortcut}>{(keys) => <Text class={`${inlineLabel} ${type.meta} text-muted-foreground`}>{keys()}</Text>}</If>
+      <View class={`${multiline() ? "h-5 w-4" : "size-4"} shrink-0 items-center justify-center`}>
         <If when={props.checked === true}>
           <Icon name="check" size="sm" />
         </If>
@@ -94,9 +103,9 @@ export function Submenu(props: { label: string; icon?: IconName; children: JSX.E
     <BaseSubmenu
       offset={6}
       trigger={
-        <View class={itemRow}>
+        <View class={`${itemRow} items-center`}>
           <If when={props.icon}>{(icon) => <Icon name={icon()} size="md" />}</If>
-          <Text class={`flex-1 ${type.ui} text-popover-foreground`}>{props.label}</Text>
+          <Text class={`flex-1 ${inlineLabel} ${type.ui} text-popover-foreground`}>{props.label}</Text>
           <Icon name="chevron-right" size="sm" color="muted-foreground" />
         </View>
       }

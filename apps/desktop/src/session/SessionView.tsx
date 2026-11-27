@@ -1,10 +1,8 @@
-import { computed, effect, keymap, List, signal, Text, View } from "nsh";
+import { cleanup, computed, effect, keymap, List, signal, Text, View } from "nsh";
 import type { ListRef, ViewRef } from "nsh";
-import { ResizablePanel, ResizablePanelGroup } from "nsh/base";
 import { t } from "nsh/i18n";
 
 import type { MessageId, SessionId, ToolCallId } from "../client/acp/protocol";
-import type { FileChange } from "../client/domain/model";
 import { TurnGroups } from "../client/turns";
 import { Composer } from "../composer/Composer";
 import type { HostStore } from "../stores/host";
@@ -12,10 +10,13 @@ import { Appear } from "../ui/appear";
 import { IconButton } from "../ui/button";
 import { Icon } from "../ui/icon";
 import { glideNextLayout } from "../ui/motion";
+import { SplitGroup, SplitPane } from "../ui/split";
 import { Badge } from "../ui/surface";
-import { type } from "../ui/tokens";
+import { inlineLabel, type } from "../ui/tokens";
 import { workspaceName } from "../shell/workspaces";
-import { ChangePanel } from "./ChangePanel";
+import { WorkspacePanel } from "./WorkspacePanel";
+import type { ChangeOpener, ViewTurnChange } from "./ChangeCard";
+import { Tooltip } from "../ui/menu";
 import { TurnRow } from "./TurnRow";
 import type { TurnSource } from "./TurnRow";
 
@@ -24,9 +25,6 @@ const BOTTOM_THRESHOLD = 48;
 
 /** Remembers the user's dragged Changes inspector width across Session switches. */
 const inspectorWidth = signal(420);
-
-/** Tracks the button that opened the inspector while its virtualized cell remains mounted. */
-export type ChangeOpener = Readonly<{ node: ViewRef; isMounted: () => boolean }>;
 
 /** One open Session: its header, its transcript as turns, and the composer. */
 export function SessionView(props: { host: HostStore; sessionId: SessionId; modalOpen?: boolean }) {
@@ -65,7 +63,8 @@ export function SessionView(props: { host: HostStore; sessionId: SessionId; moda
     },
   };
 
-  const selection = computed(() => props.host.changeSelections().get(props.sessionId));
+  const panel = computed(() => props.host.panels().get(props.sessionId));
+  const selection = computed(() => panel()?.change);
   const turnKey = computed(() => selection()?.turnKey);
   const turnIndex = computed(() => {
     const key = turnKey();
@@ -77,54 +76,61 @@ export function SessionView(props: { host: HostStore; sessionId: SessionId; moda
   });
   // Measure the space remaining after the sidebar, including when it is toggled or the window is resized.
   const compact = signal(false);
-  let opener: { turnKey: string; path: string; target: ChangeOpener } | undefined;
-  /** Closes the inspector and restores focus only if the originating card cell is still mounted. */
-  const closeChange = () => {
-    glideNextLayout();
-    const current = selection();
-    props.host.selectChange(props.sessionId);
-    const saved = opener;
+  let opener: ChangeOpener | undefined;
+  let headerButton: ViewRef | undefined;
+  let restoreFocus: ReturnType<typeof setTimeout> | undefined;
+  cleanup(() => clearTimeout(restoreFocus));
+  /** Returns focus to the originating card or to the header if the list recycled that card. */
+  const closePanel = () => {
+    props.host.setPanel(props.sessionId);
+    const target = opener;
     opener = undefined;
-    if (saved && current && saved.turnKey === current.turnKey && saved.path === current.path && saved.target.isMounted()) {
-      setTimeout(() => {
-        if (saved.target.isMounted()) saved.target.node.focus();
-      }, 0);
-    }
+    clearTimeout(restoreFocus);
+    restoreFocus = setTimeout(() => {
+      if (!panel() && !props.modalOpen) (target?.isMounted() ? target.node : headerButton)?.focus();
+    }, 0);
   };
-  /** Binds the inspector to the card's turn and file, or closes it when clicking the already active card. */
-  const openChange = (selectedTurnKey: string, change: FileChange, trigger?: ChangeOpener) => {
+  /** Opens the files tab from the session header, or dismisses the current panel. */
+  const togglePanel = () => {
+    if (panel()) return closePanel();
+    props.host.setPanel(props.sessionId, { tab: "files" });
+  };
+  /** Reviews a turn at its current or first file. Individual file cards also toggle an active diff closed. */
+  const openChange: ViewTurnChange = (turn, trigger, requestedFile) => {
     const current = selection();
-    if (current?.turnKey === selectedTurnKey && current.path === change.path) {
-      closeChange();
+    const change = requestedFile ?? (current?.turnKey === turn.key ? file() : undefined) ?? turn.changes[0];
+    if (!change) return;
+    const sameFile = current?.turnKey === turn.key && current.path === change.path;
+    // The last transcript button used owns focus, including when a file card closes a diff opened by Review.
+    opener = trigger;
+    if (sameFile && panel()?.tab === "changes") {
+      if (requestedFile) closePanel();
       return;
     }
-    opener = trigger ? { turnKey: selectedTurnKey, path: change.path, target: trigger } : undefined;
-    if (!file()) glideNextLayout();
-    props.host.selectChange(props.sessionId, { turnKey: selectedTurnKey, path: change.path, editId: change.edits[0].id });
+    props.host.setPanel(props.sessionId, { tab: "changes", change: sameFile ? current
+      : { turnKey: turn.key, path: change.path, editId: change.edits[0].id } });
   };
   // Bind Escape whenever the inspector is open and no modal dialog sits above the Session.
   effect(() => {
-    if (!props.modalOpen && file()) return keymap.bind("escape", closeChange, { when: compact() ? "always" : "notEditing" });
+    if (!props.modalOpen && panel()) return keymap.bind("escape", closePanel, { when: compact() ? "always" : "notEditing" });
   });
   return (
     <View class="flex-1" onLayout={({ bounds }) => compact.set(bounds.size.width < 760)}>
-      <ResizablePanelGroup
-        class="flex-1"
-        handleClass="bg-border group-hover:bg-ring group-active:bg-ring transition-colors duration-120 motion-reduce:transition-none"
-        handleThumbClass="h-6 w-1 rounded-full bg-muted-foreground opacity-0 group-hover:opacity-60 group-active:opacity-100 transition-opacity duration-120 motion-reduce:transition-none"
-        handleAccessibilityLabel={t("changes.resize")}
-      >
-        <ResizablePanel minSize={360} visible={!compact() || !file()} class="min-w-0">
+      <SplitGroup handleAccessibilityLabel={t("files.resize")} class="flex-1">
+        <SplitPane minSize={360} visible={!compact() || !panel()} class="min-w-0">
           <View class="h-12 flex-row items-center justify-between gap-3 border-b border-border px-5">
             <View class="min-w-0 flex-1 flex-row items-center gap-2.5">
               <View class="size-7 items-center justify-center rounded-lg bg-muted">
                 <Icon name="folder" size="sm" color="muted-foreground" />
               </View>
-              <Text class={`${type.ui} font-semibold text-foreground truncate`}>{summary()?.title ?? props.sessionId}</Text>
+              <Text class={`${inlineLabel} ${type.ui} font-semibold text-foreground truncate`}>{summary()?.title ?? props.sessionId}</Text>
             </View>
             <If when={summary()?.cwd}>
               {(cwd) => <Badge label={workspaceName(cwd())} />}
             </If>
+            <IconButton icon="panel-right" label={t(panel() ? "files.hide" : "files.open")} selected={!!panel()}
+              buttonRef={(node) => { headerButton = node; }} tooltip={<Tooltip text={t(panel() ? "files.hide" : "files.open")} />}
+              onPress={togglePanel} />
           </View>
           <View class="flex-1">
             <List
@@ -140,7 +146,7 @@ export function SessionView(props: { host: HostStore; sessionId: SessionId; moda
                 <TurnRow
                   turn={turn()}
                   source={source}
-                  selectedPath={selection()?.turnKey === turn().key ? selection()?.path : undefined}
+                  selectedPath={panel()?.tab === "changes" && selection()?.turnKey === turn().key ? selection()?.path : undefined}
                   onViewChange={openChange}
                 />
               )}
@@ -163,25 +169,22 @@ export function SessionView(props: { host: HostStore; sessionId: SessionId; moda
           </View>
           <Composer host={props.host} disabled={props.host.phase().kind !== "ready"} sessionId={props.sessionId}
             onSend={(draft) => props.host.prompt(props.sessionId, draft.text, draft.images)} />
-        </ResizablePanel>
-        <ResizablePanel
+        </SplitPane>
+        <SplitPane
           size={compact() ? undefined : inspectorWidth()}
           minSize={300}
           fixed={!compact()}
-          visible={!!file()}
-          onResize={({ size }) => { if (!compact()) inspectorWidth.set(size); }}
+          visible={!!panel()}
+          onResize={(size) => { if (!compact()) inspectorWidth.set(size); }}
           class="min-w-0"
         >
-          <If when={file()}>
-            {(change) => <ChangePanel change={change()} turnNumber={turnIndex() + 1} editId={selection()?.editId}
-              compact={compact()} onClose={closeChange}
-              onEdit={(editId) => {
-                const current = selection();
-                if (current) props.host.selectChange(props.sessionId, { ...current, editId });
-              }} />}
+          <If when={panel()}>
+            {(active) => <WorkspacePanel host={props.host} cwd={summary()?.cwd} panel={active()} compact={compact()} modalOpen={props.modalOpen}
+              turns={turns()} file={file()} turnNumber={turnIndex() + 1} onClose={closePanel}
+              onChange={(next) => props.host.setPanel(props.sessionId, next)} />}
           </If>
-        </ResizablePanel>
-      </ResizablePanelGroup>
+        </SplitPane>
+      </SplitGroup>
     </View>
   );
 }

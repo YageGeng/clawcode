@@ -107,11 +107,11 @@ export function EmptyState(props: {
       </View>
       {/* Full width so a narrow window wraps the heading instead of pushing it past the edges. */}
       <View class="w-full flex-row flex-wrap items-center justify-center gap-2">
-        <Text class={`${type.heading} text-center text-foreground`}>{t("empty.heading")}</Text>
+        <Text class={`-translate-y-0.5 ${type.heading} text-center text-foreground`}>{t("empty.heading")}</Text>
         {/* The picker and the closing words stay together, so "?" never wraps onto a line alone. */}
         <View class="flex-row items-center gap-2">
           <WorkspacePicker remote={host().info.kind === "remote"} workspaces={workspaces()} value={props.cwd} onChange={props.onCwdChange} size="md" />
-          <Text class={`${type.heading} text-foreground`}>{t("empty.headingAfter")}</Text>
+          <Text class={`-translate-y-0.5 ${type.heading} text-foreground`}>{t("empty.headingAfter")}</Text>
         </View>
       </View>
       <Composer host={host()} sessionId={sessionId()} disabled={props.cwd === null || host().phase().kind !== "ready"}

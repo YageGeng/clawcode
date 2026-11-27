@@ -4,13 +4,14 @@ import { AlertDialog, Dialog as BaseDialog, Sheet as BaseSheet } from "nsh/base"
 import type { JSX } from "nsh/jsx-runtime";
 
 import { IconButton } from "./button";
+import { inlineLabel } from "./tokens";
 
 /** The title row of a dialog or a sheet, with its close button. */
 function PanelHeader(props: { title: string; onClose: () => void }) {
   return (
     <View class="flex-row items-center gap-2">
       {/* Device names in confirmation titles may wrap; reserve the close button's hit area. */}
-      <Text class="flex-1 text-base leading-6 font-semibold text-popover-foreground">{props.title}</Text>
+      <Text class={`flex-1 ${inlineLabel} text-base leading-6 font-semibold text-popover-foreground`}>{props.title}</Text>
       <IconButton icon="x" label={t("common.close")} size="sm" onPress={props.onClose} />
     </View>
   );
@@ -39,7 +40,7 @@ export function Dialog(props: {
         if (!event.open) props.onClose();
       }}
       backdropClass="bg-foreground/30"
-      class="m-auto w-[480px] max-w-[90%] gap-4 rounded-(--radius-lg) border border-border bg-popover p-6 shadow-lg"
+      class="m-auto w-[520px] max-w-[92%] gap-4 rounded-(--radius-lg) border border-border bg-popover p-6 shadow-lg"
     >
       <PanelHeader title={props.title} onClose={props.onClose} />
       {props.children}

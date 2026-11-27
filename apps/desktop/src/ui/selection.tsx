@@ -7,7 +7,7 @@ import type { ControlSize } from "./button";
 import { Icon } from "./icon";
 import { popupSurface } from "./menu";
 import { motionClass } from "./motion";
-import { focusRing, type } from "./tokens";
+import { focusRing, inlineLabel, type } from "./tokens";
 
 /** A checkbox with its label; the app owns `checked`. */
 export function Checkbox(props: { label: string; checked: boolean; disabled?: boolean; onChange: (checked: boolean) => void }) {
@@ -25,7 +25,7 @@ export function Checkbox(props: { label: string; checked: boolean; disabled?: bo
         </View>
       }
     >
-      <Text class={`${type.ui} text-foreground`}>{props.label}</Text>
+      <Text class={`${inlineLabel} ${type.ui} text-foreground`}>{props.label}</Text>
     </BaseCheckbox>
   );
 }
@@ -42,7 +42,7 @@ export function Switch(props: { label: string; checked: boolean; disabled?: bool
       trackClass={`h-5 w-9 justify-center rounded-full bg-input px-0.5 checked:bg-primary ${motionClass.wash}`}
       thumbClass={`size-4 rounded-full bg-background checked:translate-x-4 ${motionClass.move}`}
     >
-      <Text class={`${type.ui} text-foreground`}>{props.label}</Text>
+      <Text class={`${inlineLabel} ${type.ui} text-foreground`}>{props.label}</Text>
     </BaseSwitch>
   );
 }
@@ -95,7 +95,7 @@ export function Select(props: {
       itemClass={`group h-8 justify-center rounded-(--radius) px-2.5 focus:bg-accent hover:bg-accent disabled:opacity-50 ${motionClass.wash}`}
       renderItem={(entry) => (
         <View class="flex-row items-center justify-between gap-2">
-          <Text class={`min-w-0 flex-1 truncate ${type.ui} text-popover-foreground group-selected:font-medium`}>{entry.title}</Text>
+          <Text class={`min-w-0 flex-1 truncate ${inlineLabel} ${type.ui} text-popover-foreground group-selected:font-medium`}>{entry.title}</Text>
           <View class="size-4 shrink-0 items-center justify-center opacity-0 group-selected:opacity-100">
             <Icon name="check" size="sm" />
           </View>
@@ -126,7 +126,7 @@ function SelectTrigger(props: {
       ref={(node) => props.triggerRef?.(node)}
       class={`flex-row items-center justify-between rounded-(--radius) ${props.variant === "toolbar" ? "gap-1 bg-transparent" : "gap-2 border border-input bg-background"} hover:bg-accent ${focusRing} ${motionClass.wash} ${triggerSizing[props.size]} ${props.disabled ? "opacity-50" : ""}`}
     >
-      <Text class={`shrink truncate ${props.size === "sm" ? type.meta : type.ui} ${props.variant === "toolbar" ? "font-medium text-muted-foreground" : "text-foreground"}`}>{props.label}</Text>
+      <Text class={`shrink truncate ${inlineLabel} ${props.size === "sm" ? type.meta : type.ui} ${props.variant === "toolbar" ? "font-medium text-muted-foreground" : "text-foreground"}`}>{props.label}</Text>
       <View class="shrink-0">
         <Icon name="chevron-down" size="sm" color="muted-foreground" />
       </View>

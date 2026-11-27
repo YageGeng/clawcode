@@ -1,7 +1,7 @@
 import { Text, View } from "nsh";
 
 import { CopyButton } from "../ui/copy";
-import { type } from "../ui/tokens";
+import { inlineLabel, type } from "../ui/tokens";
 
 /** What sits under an answer: copy it, and when it was written. */
 export function MessageActions(props: { text: string; timestampMs: string }) {
@@ -9,7 +9,7 @@ export function MessageActions(props: { text: string; timestampMs: string }) {
   return (
     <View class="flex-row items-center gap-2">
       <CopyButton text={props.text} />
-      <Text class={`${type.meta} text-muted-foreground`}>{time()}</Text>
+      <Text class={`${inlineLabel} ${type.meta} text-muted-foreground`}>{time()}</Text>
     </View>
   );
 }

@@ -36,5 +36,12 @@ export const toneToken = {
   info: "info",
 } as const;
 
+/**
+ * Lifts single-line UI labels by 1pt inside `items-center` rows and fixed-height pills.
+ * System sans-serif fonts reserve more ascent (diacritic headroom above capitals) than descent,
+ * placing the cap/x-height and CJK optical center ~1pt below the line box's geometric midpoint.
+ */
+export const inlineLabel = "-translate-y-px";
+
 /** The focus ring every pressable control draws for the keyboard, outside its border. */
 export const focusRing = "focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-1 focus-visible:ring-offset-background";

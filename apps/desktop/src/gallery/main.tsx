@@ -11,6 +11,7 @@ import { confirm, Dialog, Sheet } from "../ui/dialog";
 import { MessageBubble } from "../ui/bubble";
 import { Disclosure } from "../ui/disclosure";
 import { Empty, Skeleton, Spinner } from "../ui/feedback";
+import { FileIcon } from "../ui/fileIcon";
 import { Markdown } from "../ui/markdown";
 import { Field, Input, Textarea } from "../ui/input";
 import { ListItem, TreeList } from "../ui/list";
@@ -31,7 +32,7 @@ function Section(props: { title: string; children: JSX.Element }) {
   );
 }
 
-const variants: ButtonVariant[] = ["primary", "secondary", "ghost", "outline", "danger"];
+const variants: ButtonVariant[] = ["primary", "secondary", "subtle", "ghost", "outline", "danger"];
 
 /** Every `ui` component in its variants, sizes and states, for review in light and dark. */
 function Gallery() {
@@ -131,13 +132,25 @@ function Gallery() {
             accessibilityLabel="Panel"
             items={[
               { value: "transcript", label: "Transcript" },
-              { value: "changes", label: "Changes" },
+              { value: "changes", label: "Changes", badge: 3 },
               { value: "trajectory", label: "Trajectory" },
               { value: "context", label: "Context", disabled: true },
             ]}
             value={tab()}
             onChange={(value) => tab.set(value)}
           />
+          <View class="h-12 flex-row items-center border-b border-border px-3">
+            <Tabs
+              variant="bar"
+              accessibilityLabel="Workspace panel"
+              items={[
+                { value: "transcript", label: "Files" },
+                { value: "changes", label: "Changes", badge: 2 },
+              ]}
+              value={tab() === "changes" ? "changes" : "transcript"}
+              onChange={(value) => tab.set(value)}
+            />
+          </View>
           <Text class={`${type.meta} text-muted-foreground`}>Showing {tab()}</Text>
         </Section>
         <Section title="Menu">
@@ -211,6 +224,17 @@ function Gallery() {
             onExpandedChange={(value) => expanded.set(value)}
             onSelectedChange={(id) => selectedNode.set(id)}
           />
+          <View class="flex-row flex-wrap items-center gap-2.5 rounded-(--radius) border border-border bg-background px-3 py-2">
+            <FileIcon path="src" kind="directory" open />
+            <FileIcon path="Cargo.toml" />
+            <FileIcon path="main.rs" />
+            <FileIcon path="App.tsx" />
+            <FileIcon path="App.test.tsx" />
+            <FileIcon path="theme.json" />
+            <FileIcon path="en.yml" />
+            <FileIcon path="Dockerfile" />
+            <FileIcon path="README.md" />
+          </View>
         </Section>
         <Section title="Surface">
           <Badge label="Draft" />

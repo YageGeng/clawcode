@@ -10,6 +10,21 @@ settings:
   title: Settings
   appearance: Appearance
   language: Language
+  iconTheme: Icon theme
+  iconThemeHelp: The set of icons associated with files and folders.
+iconTheme:
+  dynamic: Dynamic
+  minimal: Minimal (Monochrome)
+  mode: Mode
+  modeHelp: Choose whether to use the light or dark icon theme, or follow window appearance.
+  modes:
+    system: System
+    light: Light
+    dark: Dark
+  lightTheme: Light icon theme
+  lightThemeHelp: Used when mode is light, or when following appearance in light mode.
+  darkTheme: Dark icon theme
+  darkThemeHelp: Used when mode is dark, or when following appearance in dark mode.
 appearance:
   system: Match system
   light: Light
@@ -53,23 +68,48 @@ turn:
   message: Assistant message
   proposedPlan: Proposed plan
   work: Work details
-  changedFiles: "Changed files (%{count})"
+  changedFile: "1 file changed"
+  changedFiles: "%{count} files changed"
   workedFor: Worked for %{duration}
   working: Working
 time:
   seconds: "%{s}s"
   minutesSeconds: "%{m}m %{s}s"
 changes:
+  review: Review
+  lineCounts: "%{added} lines added, %{removed} removed"
   turn: Turn %{number}
   view: View changes
   viewFile: View changes to %{path}
+  openDiff: Open diff for %{path}
   title: Changes
-  close: Close changes
-  resize: Resize changes panel
   editIndex: Edit %{current} of %{total}
   previous: Previous edit
   next: Next edit
+  backToList: All changed files
   edited: Edited %{file}
+files:
+  hide: Hide workspace panel
+  title: Files
+  panel: Workspace panel
+  open: Open workspace panel
+  close: Close workspace panel
+  closePreview: Close preview
+  copyFile: Copy file contents
+  resize: Resize workspace panel
+  resizePreview: Resize file preview
+  tree: Workspace files
+  preview: Preview of %{path}
+  emptyFile: Empty file
+  loading: Loading…
+  emptyDirectory: Empty folder
+  truncated: More entries were omitted.
+  directoryFailed: "Could not load folder. Reopen to retry. %{reason}"
+  loadFailed: Could not load workspace content
+  tooLarge: This file exceeds the preview size limit.
+  binary: Binary file. No text preview available.
+  unavailable: Workspace files are unavailable.
+  noChanges: No recorded file changes.
 composer:
   label: Message
   placeholder: Ask anything

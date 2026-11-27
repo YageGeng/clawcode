@@ -8,6 +8,7 @@ import { AcpConnection, AcpRequestError } from "../client/acp/connection";
 import type { AcpNotification } from "../client/acp/connection";
 import { promptBlocks } from "../client/acp/prompt";
 import type { PromptDraft, PromptImage } from "../client/acp/prompt";
+import { WorkspaceFiles } from "../client/acp/workspaceFiles";
 import { AcpProtocol } from "../client/acp/protocol";
 import type { NewSessionResult, SessionId, SessionListResult, SessionUpdateNotification } from "../client/acp/protocol";
 import { decodeSessionConfig } from "../client/acp/sessionConfig";
@@ -59,6 +60,9 @@ export type HostPhase =
 /** Identifies a recorded edit without retaining patch data across a branch replay. */
 export type ChangeSelection = Readonly<{ turnKey: string; path: string; editId: string }>;
 
+/** The visible workspace tab and recorded edit belong to the host and session that opened them. */
+export type SessionPanel = Readonly<{ tab: "files" | "changes"; change?: ChangeSelection }>;
+
 /** One host's connection and the Sessions it serves; its methods are the only writers. */
 export type HostStore = Readonly<{
   info: HostInfo;
@@ -105,8 +109,9 @@ export type HostStore = Readonly<{
   /** Sends text and selected images; a failed turn returns the complete draft and adds a notice. */
   prompt: (sessionId: SessionId, text: string, images?: readonly PromptImage[]) => Promise<void>;
   /** Each Session on this host remembers its own open inspector. */
-  changeSelections: Accessor<ReadonlyMap<SessionId, ChangeSelection>>;
-  selectChange: (sessionId: SessionId, selection?: ChangeSelection) => void;
+  panels: Accessor<ReadonlyMap<SessionId, SessionPanel>>;
+  files: WorkspaceFiles;
+  setPanel: (sessionId: SessionId, panel?: SessionPanel) => void;
   returnedDrafts: Accessor<ReadonlyMap<SessionId, PromptDraft>>;
   /** Consumes both parts of the failed prompt in one operation. */
   takeReturnedDraft: (sessionId: SessionId) => PromptDraft | undefined;
@@ -146,7 +151,7 @@ export function createHostStore(
     const cached = offlineSessions();
     return cached ? { ...workspace(), ...cached } : workspace();
   });
-  const changeSelections = signal<ReadonlyMap<SessionId, ChangeSelection>>(new Map());
+  const panels = signal<ReadonlyMap<SessionId, SessionPanel>>(new Map());
   const returnedDrafts = signal<ReadonlyMap<SessionId, PromptDraft>>(new Map());
   /** Consume the text and images together so retries and reconnects cannot lose part of a failed submission. */
   const takeReturnedDraft = (sessionId: SessionId) => {
@@ -284,7 +289,7 @@ export function createHostStore(
       const cached = reduceWorkspace({ sessions, sessionWorkspaces, sessionConfigs, awaitingAnswers, sessionCommands: new Map(), notices, permissions: [] }, { type: "sessions/stopped" });
       offlineSessions.set({ sessions, sessionWorkspaces: cached.sessionWorkspaces, awaitingAnswers: cached.awaitingAnswers });
       workspace.set(reduceWorkspace(cached, { type: "questions/invalidated" }));
-      changeSelections.set(previous.changeSelections());
+      panels.set(previous.panels());
       returnedDrafts.set(previous.returnedDrafts());
       hasCache = true;
       phase.set({ kind: "reconnecting" });
@@ -483,10 +488,11 @@ export function createHostStore(
     info,
     phase,
     workspace: readableWorkspace,
-    changeSelections,
-    selectChange: (sessionId, selection) => changeSelections.update((current) => {
+    files: new WorkspaceFiles(connection, timeoutMs),
+    panels,
+    setPanel: (sessionId, panel) => panels.update((current) => {
       const next = new Map(current);
-      if (selection) next.set(sessionId, selection);
+      if (panel) next.set(sessionId, panel);
       else next.delete(sessionId);
       return next;
     }),

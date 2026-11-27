@@ -32,7 +32,7 @@ and TUI keep the components' semantics and change presentation only.
 | Spacing | 2, 4, 8, 12, 16, 24, 32 (Tailwind steps `0.5`, `1`, `2`, `3`, `4`, `6`, `8`) |
 | Control height | `sm` 24, `md` 32 (default) |
 | Rows | sidebar and menu rows 32; dense lists 28 |
-| Icons | 14 in `sm` controls and dense rows, 16 elsewhere; Lucide only, through `ui/icon` |
+| Icons | 14 in `sm` controls and dense rows, 16 elsewhere; Lucide for UI controls (`ui/icon`), Catppuccin file/folder icons (`ui/fileIcon`, Latte in light, Mocha in dark) for workspace paths |
 | Radius | `radius` 10 for controls; `radius-lg` 16 for popovers, cards and dialogs; `radius-xl` 22 for the composer card; `rounded-full` for pills, dots and round buttons |
 
 Related label/control pairs use 4–8; groups 12–16; sections 24–32.
@@ -270,8 +270,20 @@ The production question flow kept the message draft visible while awaiting an an
 
 | Interaction | Feedback | Reduced motion |
 | --- | --- | --- |
+| 展开本轮文件变更或开始审查 | 通栏摘要左侧显示文件数和累计增删行数，箭头随文件列表开合旋转。右侧「审查」直接打开本轮 diff。 | 保留摘要和两个操作，立即切换展开状态。 |
 | Open View changes | The file card opens the Changes inspector at the right. The conversation and its draft keep their place. A narrow session gives the inspector the available width. | Change the layout immediately. |
 | Inspect another file or edit | The card totals all edits to the file in the turn. The inspector shows the selected edit's counts and unified diff. Previous and next step through the edits in order. Receiving the same edit again preserves the reader's scroll position. | Update the content immediately. |
 | Close the inspector | The close button restores the conversation width. Dragging the wide layout's divider adjusts the split directly. | Restore the layout immediately. |
 
 The GTK session fixture on Wayland showed the Chinese inspector beside the conversation at 1200 × 800 in both themes. Dragging the divider resized it. At 800 × 720 the diff filled the session area, and Escape returned to the expanded file card.
+
+### N3 文件浏览与预览
+
+| 交互 | 界面反馈 | 减少动态效果时 |
+| --- | --- | --- |
+| 从会话顶栏打开工作区面板 | 宽窗口并排展示会话与面板（即时开合，无跨栏位移动画），窄窗口用返回按钮回到会话 | 直接切换布局 |
+| 在「文件」和「变更」之间切换 | 单一底边线上的标签指示线平滑滑动，显示已变更文件数徽标，保留当前文件预览和已选 diff | 直接切换标签 |
+| 展开目录或选择文件 | 目录展开采用原生弹簧推进与箭头旋转；按需读取所属主机内容，在下方可拖拽分栏中即时打开/收起只读预览（无向上淡入淡出，支持一键复制）；空文件、二进制、大文件（附大小）和读取失败显示对应状态 | 无位移动画，同样显示读取状态 |
+| 在单文件 diff 与变更列表间往返 | Diff 子顶栏左侧返回按钮退回按轮次分组的变更卡片列表，便于在窄窗口或多文件会话中切换文件 | 直接切换视图 |
+
+Wayland 同机双实例验收使用独立的设备身份和后端数据目录。控制端配对后从远程会话展开目录并读到了主机文件内容。1200 × 800 浅色窗口并排显示会话与预览，800 × 560 深色窗口中返回按钮恢复会话。原生交互测试覆盖快速切换预览、返回同一次编辑以及保留未发送草稿。

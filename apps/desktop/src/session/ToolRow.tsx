@@ -6,7 +6,7 @@ import type { ToolCallId } from "../client/acp/protocol";
 import type { ToolCallEntity, ToolKind } from "../client/domain/model";
 import { Disclosure } from "../ui/disclosure";
 import type { IconName } from "../ui/icon";
-import { type } from "../ui/tokens";
+import { inlineLabel, type } from "../ui/tokens";
 import { ToolDetails } from "./ToolContent";
 import type { TurnSource } from "./TurnRow";
 
@@ -41,9 +41,9 @@ export function ToolRow(props: { id: ToolCallId; source: TurnSource }) {
           trailing={
             <View class="min-w-0 shrink flex-row items-center gap-2">
               <If when={toolHint(call())}>
-                {(hint) => <Text class={`shrink truncate font-mono ${type.meta} text-muted-foreground`}>{hint()}</Text>}
+                {(hint) => <Text class={`shrink truncate ${inlineLabel} font-mono ${type.meta} text-muted-foreground`}>{hint()}</Text>}
               </If>
-              <Text class={`${type.meta} ${call().status === "failed" ? "text-destructive" : "text-muted-foreground"}`}>
+              <Text class={`${inlineLabel} ${type.meta} ${call().status === "failed" ? "text-destructive" : "text-muted-foreground"}`}>
                 {t(`toolDetail.status.${call().status}`)}
               </Text>
             </View>

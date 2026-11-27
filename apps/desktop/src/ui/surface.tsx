@@ -1,8 +1,9 @@
 import { Text, View } from "nsh";
+import { t } from "nsh/i18n";
 import type { JSX } from "nsh/jsx-runtime";
 
 import type { Tone } from "./tokens";
-import { toneFill, toneSoft, type } from "./tokens";
+import { inlineLabel, toneFill, toneSoft, type } from "./tokens";
 import { motionClass } from "./motion";
 
 /** Each surface's look: a content card, or the floating composer card (spec §5.1). */
@@ -20,7 +21,7 @@ export function Surface(props: { children: JSX.Element; variant?: keyof typeof s
 export function Badge(props: { label: string; tone?: Tone }) {
   return (
     <View class={`h-5 justify-center rounded-full px-2 ${toneSoft[props.tone ?? "neutral"]}`}>
-      <Text class={`${type.meta} font-medium`}>{props.label}</Text>
+      <Text class={`${inlineLabel} ${type.meta} font-medium`}>{props.label}</Text>
     </View>
   );
 }
@@ -39,7 +40,7 @@ export function StatusDot(props: { tone: Tone; label: string; live?: boolean; hi
     <View class="flex-row items-center gap-1.5" accessibilityLabel={props.label}>
       <View class={`size-2 rounded-full ${toneFill[props.tone]} ${props.live === true ? motionClass.pulse : ""}`} />
       <If when={props.hideLabel !== true}>
-        <Text class={`${type.meta} text-muted-foreground`}>{props.label}</Text>
+        <Text class={`${inlineLabel} ${type.meta} text-muted-foreground`}>{props.label}</Text>
       </If>
     </View>
   );
@@ -48,9 +49,9 @@ export function StatusDot(props: { tone: Tone; label: string; live?: boolean; hi
 /** A diff's added and removed line counts. */
 export function LineCounts(props: { added: number; removed: number }) {
   return (
-    <View class="flex-row gap-1.5" accessibilityLabel={`${props.added} lines added, ${props.removed} removed`}>
-      <Text class={`${type.meta} font-mono text-added`}>+{props.added}</Text>
-      <Text class={`${type.meta} font-mono text-removed`}>−{props.removed}</Text>
+    <View class="shrink-0 flex-row items-center gap-1.5" accessibilityLabel={t("changes.lineCounts", { added: props.added, removed: props.removed })}>
+      <Text class={`${inlineLabel} ${type.meta} font-mono text-added`}>+{props.added}</Text>
+      <Text class={`${inlineLabel} ${type.meta} font-mono text-removed`}>−{props.removed}</Text>
     </View>
   );
 }

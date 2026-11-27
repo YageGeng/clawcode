@@ -4,7 +4,7 @@ import { expect, test } from "nsh/test";
 import { createAppStore } from "../../src/stores/app";
 import { createHostStore, LOCAL_HOST } from "../../src/stores/host";
 import { RemoteStore } from "../../src/stores/remote";
-import { createSettingsStore } from "../../src/stores/settings";
+import { createSettingsStore, DEFAULT_SETTINGS } from "../../src/stores/settings";
 import { acpPeer, MemoryTransport } from "../support/memoryTransport";
 
 type Snapshot = Awaited<ReturnType<RemoteHosting["snapshot"]>>;
@@ -62,7 +62,7 @@ test("disabling_sharing_saves_before_stop_and_is_independent_of_appearance_edits
   fixture.remote.close();
   drain.resolve();
   await result;
-  expect(settings.settings()).toEqual({ appearance: "dark", language: "en" });
+  expect(settings.settings()).toEqual({ ...DEFAULT_SETTINGS, appearance: "dark", language: "en" });
 });
 
 test("a_rejected_preference_write_reports_the_error_and_stops_in_both_directions", async () => {

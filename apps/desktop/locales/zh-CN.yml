@@ -10,6 +10,21 @@ settings:
   title: 设置
   appearance: 外观
   language: 语言
+  iconTheme: 图标主题
+  iconThemeHelp: 为文件与文件夹关联的图标样式集合。
+iconTheme:
+  dynamic: 动态切换
+  minimal: 简约单色
+  mode: 模式
+  modeHelp: 选择固定使用浅色或深色图标主题，或跟随当前界面外观切换。
+  modes:
+    system: 跟随外观
+    light: 浅色
+    dark: 深色
+  lightTheme: 浅色图标主题
+  lightThemeHelp: 模式设为浅色，或跟随外观处于浅色时使用。
+  darkTheme: 深色图标主题
+  darkThemeHelp: 模式设为深色，或跟随外观处于深色时使用。
 appearance:
   system: 跟随系统
   light: 浅色
@@ -53,23 +68,48 @@ turn:
   message: 助手消息
   proposedPlan: 计划内容
   work: 工作记录
-  changedFiles: "文件改动（%{count}）"
+  changedFile: "1 个文件已更改"
+  changedFiles: "%{count} 个文件已更改"
   workedFor: 用时 %{duration}
   working: 正在工作
 time:
   seconds: "%{s} 秒"
   minutesSeconds: "%{m} 分 %{s} 秒"
 changes:
+  review: 审查
+  lineCounts: "新增 %{added} 行，删除 %{removed} 行"
   turn: 第 %{number} 轮
   view: 查看变更
   viewFile: 查看 %{path} 的变更
+  openDiff: 打开 %{path} 的变更差异
   title: 变更
-  close: 关闭变更面板
-  resize: 调整变更面板宽度
   editIndex: 第 %{current} 次编辑，共 %{total} 次
   previous: 上一次编辑
   next: 下一次编辑
+  backToList: 全部变更文件
   edited: 已编辑 %{file}
+files:
+  hide: 收起工作区面板
+  title: 文件
+  panel: 工作区面板
+  open: 打开工作区面板
+  close: 关闭工作区面板
+  closePreview: 关闭预览
+  copyFile: 复制文件内容
+  resize: 调整工作区面板宽度
+  resizePreview: 调整文件预览高度
+  tree: 工作区文件
+  preview: 预览 %{path}
+  emptyFile: 空文件
+  loading: 正在读取…
+  emptyDirectory: 空文件夹
+  truncated: 其余条目已省略
+  directoryFailed: 文件夹读取失败，重新展开可重试。%{reason}
+  loadFailed: 无法读取工作区内容
+  tooLarge: 文件超过预览大小限制
+  binary: 二进制文件无法预览为文本
+  unavailable: 暂时无法浏览工作区文件
+  noChanges: 暂无已记录的文件变更
 composer:
   label: 消息
   placeholder: 有问题，尽管问

@@ -6,10 +6,10 @@ import type { JSX } from "nsh/jsx-runtime";
 import { Icon } from "./icon";
 import type { IconColor, IconName } from "./icon";
 import { motionClass } from "./motion";
-import { focusRing, type } from "./tokens";
+import { focusRing, inlineLabel, type } from "./tokens";
 
 /** A button's meaning: how loudly it asks to be pressed. */
-export type ButtonVariant = "primary" | "secondary" | "ghost" | "outline" | "danger";
+export type ButtonVariant = "primary" | "secondary" | "subtle" | "ghost" | "outline" | "danger";
 
 /** Control sizes on the desktop: `sm` 24pt, `md` 32pt. */
 export type ControlSize = "sm" | "md";
@@ -18,6 +18,7 @@ export type ControlSize = "sm" | "md";
 const surface: Readonly<Record<ButtonVariant, string>> = {
   primary: "bg-primary hover:bg-primary/90 active:bg-primary/80 selected:bg-primary/80",
   secondary: "bg-secondary hover:bg-secondary/80 active:bg-secondary/60 selected:bg-secondary/60",
+  subtle: "border border-border/70 bg-foreground/5 hover:bg-accent active:bg-accent/70",
   ghost: "bg-transparent hover:bg-accent active:bg-accent/70 selected:bg-accent",
   outline: "border border-input bg-background hover:bg-accent active:bg-accent/70 selected:bg-accent",
   danger: "bg-destructive hover:bg-destructive/90 active:bg-destructive/80 selected:bg-destructive/80",
@@ -27,6 +28,7 @@ const surface: Readonly<Record<ButtonVariant, string>> = {
 const ink: Readonly<Record<ButtonVariant, { text: string; icon: IconColor }>> = {
   primary: { text: "text-primary-foreground", icon: "primary-foreground" },
   secondary: { text: "text-secondary-foreground", icon: "secondary-foreground" },
+  subtle: { text: "text-secondary-foreground", icon: "muted-foreground" },
   ghost: { text: "text-foreground", icon: "foreground" },
   outline: { text: "text-foreground", icon: "foreground" },
   danger: { text: "text-destructive-foreground", icon: "destructive-foreground" },
@@ -67,7 +69,7 @@ export function Button(props: ButtonBaseProps & { label: string; accessibilityLa
       disabled={props.disabled === true || props.loading === true}
       selected={props.selected === true}
       onPress={props.onPress}
-      class={`${shell} rounded-(--radius) ${motionClass.wash} ${motionClass.press} ${surface[variant()]} ${sizing[size()]} ${props.class ?? ""}`}
+      class={`${shell} ${variant() === "subtle" ? "rounded-md" : "rounded-(--radius)"} ${motionClass.wash} ${motionClass.press} ${surface[variant()]} ${sizing[size()]} ${props.class ?? ""}`}
     >
       <If when={props.loading === true}>
         <Icon name="loader-circle" size="sm" color={ink[variant()].icon} class={motionClass.spin} />
@@ -75,7 +77,7 @@ export function Button(props: ButtonBaseProps & { label: string; accessibilityLa
       <If when={props.loading !== true && props.icon !== undefined}>
         <Icon name={props.icon ?? "plus"} size="sm" color={ink[variant()].icon} />
       </If>
-      <Text class={`shrink truncate ${ink[variant()].text} ${textSize[size()]} font-medium`}>{props.label}</Text>
+      <Text class={`shrink truncate ${inlineLabel} ${ink[variant()].text} ${textSize[size()]} font-medium`}>{props.label}</Text>
       <If when={props.trailingIcon !== undefined}>
         <Icon name={props.trailingIcon ?? "chevron-down"} size="sm" color={variant() === "ghost" || variant() === "outline" ? "muted-foreground" : ink[variant()].icon} />
       </If>
