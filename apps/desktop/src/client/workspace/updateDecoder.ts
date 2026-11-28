@@ -1,3 +1,5 @@
+import { t } from "nsh/i18n";
+
 import { decodeCommands } from "../acp/commands";
 import { AcpProtocol } from "../acp/protocol";
 import { decodeSessionConfig } from "../acp/sessionConfig";
@@ -12,7 +14,8 @@ import { decodeTerminal } from "./terminal";
 export type DecodedSessionUpdate =
   | Readonly<{ scope: "branch"; refreshRuntime: false }>
   | Readonly<{ scope: "global"; actions: readonly WorkspaceAction[]; refreshRuntime: false }>
-  | Readonly<{ scope: "session"; actions: readonly SessionWorkspaceAction[]; refreshRuntime: boolean }>;
+  /** `notice`: what a live update has to tell the user (a Run that ended with an error); a replay drops it. */
+  | Readonly<{ scope: "session"; actions: readonly SessionWorkspaceAction[]; refreshRuntime: boolean; notice?: SessionNotice }>;
 
 /** What every Session update carries besides its own fields. */
 type UpdateContext = Readonly<{
@@ -119,7 +122,21 @@ export class SessionUpdateDecoder {
     }
     if (kind === "state_update" && (update.state === "running" || update.state === "requires_action" || update.state === "idle")) {
       // Waiting on the user is still foreground work; unknown states leave the flag unchanged.
-      return { scope: "session", actions: [{ type: "running/changed", running: update.state !== "idle" }], refreshRuntime: update.state === "idle" };
+      const actions: readonly SessionWorkspaceAction[] = [{ type: "running/changed", running: update.state !== "idle" }];
+      // A Run that ended with an error says why; a rejected credential (-32000 with `methodId`) offers its sign-in.
+      const error = update.state === "idle" && update.stopReason === "error" ? AcpProtocol.record(update.error) : undefined;
+      if (error === undefined) return { scope: "session", actions, refreshRuntime: update.state === "idle" };
+      const methodId = AcpProtocol.record(error.data)?.methodId;
+      const signIn = error.code === -32000 && typeof methodId === "string" ? methodId : undefined;
+      const notice: SessionNotice = {
+        id: `${notification.sessionId}:${receivedOrder}`,
+        sessionId: notification.sessionId,
+        title: t(signIn === undefined ? "notice.runFailed" : "notice.signInAgain"),
+        ...(typeof error.message === "string" && error.message ? { description: error.message } : {}),
+        ...(signIn === undefined ? {} : { signIn }),
+        fromRun: true,
+      };
+      return { scope: "session", actions, refreshRuntime: true, notice };
     }
 
     const content = AcpProtocol.record(update.content);

@@ -13,8 +13,9 @@ test("mixed_reply_shell_and_question_choices_remain_visible_in_transcript_order"
   const ordered = ["Before the file.", "Report file", "After the file.", "!pwd", "Which format?", "Plain text",
     "Add a chart?", "Skipped question", "Format confirmed."];
   expect(app.texts().filter((value) => ordered.includes(value))).toEqual(ordered);
-  expect(app.shows("label:Copy >> nth=1")).toBe(true);
-  await app.press("label:Copy >> nth=0");
+  // The prompt's own Copy comes first, then the reply's.
+  expect(app.shows("label:Copy >> nth=2")).toBe(true);
+  await app.press("label:Copy >> nth=1");
   await app.waitUntil(() => app.clipboard() === "Before the file.After the file.");
 });
 
@@ -58,7 +59,8 @@ test("running_work_stays_open_and_folds_when_the_turn_ends", async () => {
   await app.waitFor("text:Looking at the logs");
   const streaming = ["Current file", "Build output", "Looking at the logs"];
   expect(app.texts().filter((value) => streaming.includes(value))).toEqual(streaming);
-  expect(app.shows("label:Copy")).toBe(false);
+  // Only the prompt has a Copy while the reply streams.
+  expect(app.shows("label:Copy >> nth=1")).toBe(false);
   expect(app.shows("label:Assistant reply")).toBe(false);
   // The reader can still fold the live work, and open it again.
   await app.press("label:Working");
@@ -67,13 +69,13 @@ test("running_work_stays_open_and_folds_when_the_turn_ends", async () => {
   await app.waitFor("text:Check the last error.");
   await app.waitFor("text:Looking at the logs");
   await app.wait(10000);
-  await app.waitFor("label:Copy");
+  await app.waitFor("label:Copy >> nth=1");
   const final = ["Final file", "Final output", "Build passed."];
   expect(app.texts().filter((value) => final.includes(value))).toEqual(final);
   expect(app.texts()).not.toContain("Current file");
   // Once the turn ends, its work folds away.
   expect(app.texts()).not.toContain("Check the last error.");
-  await app.press("label:Copy");
+  await app.press("label:Copy >> nth=1");
   await app.waitUntil(() => app.clipboard() === "Final fileBuild passed.");
 });
 
@@ -125,11 +127,12 @@ test("the_inspector_follows_the_clicked_path_and_turn_and_keeps_each_recorded_ed
   await app.press("label:View changes to src/a.rs >> nth=1");
   await app.waitFor("text:const MAX_RETRIES: u8 = 8;");
   await app.waitFor("text:Turn 2");
+  // Settings open in their own window: closing it leaves the main window's panel and diff as they were.
   await app.press("text:Settings");
-  await app.waitFor("label:Close");
-  await app.keyboard.press("Escape");
+  await app.waitFor("label:Open workspaces in");
+  await app.window("settings").pressClose();
+  await app.waitUntil(() => !app.shows("label:Open workspaces in"));
   await app.waitFor("label:Close workspace panel");
-  expect(app.shows("label:Close")).toBe(false);
   expect(app.shows("text:use first;")).toBe(false);
 });
 

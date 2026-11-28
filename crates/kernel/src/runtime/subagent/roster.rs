@@ -194,7 +194,7 @@ impl Kernel {
                 let text = Self::bounded_answer(answer);
                 (ChildStatus::Completed(Some(text.clone())), Some(text))
             }
-            AgentOutcome::Failed { message } => (
+            AgentOutcome::Failed { message, .. } => (
                 ChildStatus::Errored(message.clone()),
                 Some(format!("Agent errored: {message}")),
             ),

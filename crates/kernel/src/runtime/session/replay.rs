@@ -356,6 +356,11 @@ impl Kernel {
                             ))
                         })?
                         .to_string(),
+                    sign_in: record
+                        .payload
+                        .get("signIn")
+                        .and_then(serde_json::Value::as_str)
+                        .map(str::to_owned),
                 },
                 Some(status) => {
                     return Err(store::StoreError::InvalidSession(format!(

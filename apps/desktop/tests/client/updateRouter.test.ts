@@ -81,6 +81,7 @@ function routedWorkspace(...sessionIds: SessionId[]) {
   return {
     router,
     session: (sessionId: SessionId) => sessionWorkspace(state, sessionId),
+    notices: () => state.notices,
     /** Delivers one frame with the ACP event metadata required by message projections. */
     send(sessionId: SessionId, ...updates: Record<string, unknown>[]) {
       router.applyMany(updates.map((update) => ({
@@ -260,4 +261,118 @@ test("discarding_a_frame_does_not_consume_partial_terminal_bytes", () => {
   expect(workspace.session(id).terminals.get("terminal")?.output).toBe("");
   workspace.send(id, { ...chunk, data: "jI0=" });
   expect(workspace.session(id).terminals.get("terminal")?.output).toBe("🌍");
+});
+
+/** Builds the atomic projection envelope used by the production backend for an active Run. */
+function recoverableGroup(sessionId: SessionId, sequence: number, updates: readonly Record<string, unknown>[], operationPhase?: "start" | "end"): SessionUpdateNotification[] {
+  return updates.map((update, projectionIndex) => ({
+    sessionId, update, _meta: { clawcode: {
+      turnId: "turn", timestampMs: "1", sequence,
+      sessionRecovery: { runId: "run", projectionIndex, projectionCount: updates.length, operationPhase },
+    } },
+  }));
+}
+
+const signInFailure = {
+  sessionUpdate: "state_update", state: "idle", stopReason: "error",
+  error: { code: -32000, message: "provider answered 401", data: { methodId: "chatgpt" } },
+};
+
+/** Keeps a live authentication failure visible while post-resume question reservations are pending. */
+test("a_live_run_error_after_wire_replay_completion_precedes_question_publication", async () => {
+  const sessionId = "session" as SessionId;
+  const workspace = routedWorkspace(sessionId);
+  let finishReservations!: () => void;
+  const reservations = new Promise<void>((resolve) => { finishReservations = resolve; });
+  const replay = workspace.router.replay(sessionId, async (history) => {
+    // The server replays the active journal, ends wire history, then reports current state before resume returns.
+    workspace.router.applyMany([
+      ...recoverableGroup(sessionId, 1, [{ sessionUpdate: "_clawcode/event", payload: { event: "run_start", run_id: "run" } }], "start"),
+      ...recoverableGroup(sessionId, 2, [{ sessionUpdate: "tool_call_update", toolCallId: "ask",
+        rawOutput: { content: { details: { type: "user_questions", request_id: "ask", questions: [{ title: "Continue?" }] } } } }]),
+      { sessionId, update: { sessionUpdate: "replay_complete" } },
+      { sessionId, update: { sessionUpdate: "state_update", state: "running" } },
+    ]);
+    expect(history.hasQuestions()).toBe(true);
+    // The host keeps the history private until the pending_messages response reserves its questions.
+    await reservations;
+    history.apply({ type: "interactions/changed", change: { type: "queued", ids: ["ask:0"] } });
+  });
+  try {
+    expect(workspace.session(sessionId).running).toBe(true);
+    expect(workspace.session(sessionId).interactions.questions).toEqual([]);
+    const settled = recoverableGroup(sessionId, 3, [
+      { sessionUpdate: "_clawcode/event", payload: { event: "agent_settled" } }, signInFailure,
+    ]);
+    workspace.router.applyMany(settled.slice(0, 1));
+    expect(workspace.session(sessionId).running).toBe(true);
+    expect(workspace.notices()).toEqual([]);
+    workspace.router.applyMany(settled.slice(1));
+    expect(workspace.session(sessionId).running).toBe(false);
+    expect(workspace.notices().map((notice) => [notice.signIn, notice.description])).toEqual([["chatgpt", "provider answered 401"]]);
+    expect(workspace.session(sessionId).interactions.questions).toEqual([]);
+  } finally {
+    finishReservations();
+    await replay;
+  }
+  expect(workspace.notices().length).toBe(1);
+  expect(workspace.session(sessionId).interactions.questions.map(({ title }) => title)).toEqual(["Continue?"]);
+  expect(workspace.session(sessionId).interactions.queued.has("ask:0")).toBe(true);
+});
+
+/** Separates historical notices from live ones in wire order and resets the boundary for every Session replay. */
+test("wire_replay_completion_is_ordered_session_local_and_reset_for_legacy_replays", async () => {
+  const sessionId = "session" as SessionId;
+  const other = "other" as SessionId;
+  const workspace = routedWorkspace(sessionId, other);
+  await workspace.router.replay(sessionId, async () => {
+    // A different Session's marker cannot end this Session's historical suppression.
+    workspace.send(other, { sessionUpdate: "replay_complete" });
+    workspace.send(sessionId, signInFailure);
+    expect(workspace.notices()).toEqual([]);
+    workspace.send(sessionId, signInFailure, { sessionUpdate: "replay_complete" }, signInFailure);
+    expect(workspace.notices().length).toBe(1);
+  });
+  await workspace.router.replay(sessionId, async () => {
+    // An older peer without replay_complete keeps the callback-based suppression, even after a modern replay.
+    workspace.send(sessionId, signInFailure);
+    expect(workspace.notices().length).toBe(1);
+  });
+  workspace.send(sessionId, signInFailure);
+  expect(workspace.notices().length).toBe(2);
+});
+
+/** A superseded branch stays quiet whether navigation happens before or after its replay marker. */
+test("superseded_branches_cannot_raise_notices_after_wire_replay_completion", async () => {
+  const sessionId = "session" as SessionId;
+  for (const navigateFirst of [true, false]) {
+    const workspace = routedWorkspace(sessionId);
+    const navigate = { sessionUpdate: "_clawcode/event", payload: { event: "branch_navigated" } };
+    const complete = { sessionUpdate: "replay_complete" };
+    await workspace.router.replay(sessionId, async () => {
+      workspace.send(sessionId, ...(navigateFirst ? [navigate, complete] : [complete, navigate]), signInFailure);
+      expect(workspace.notices()).toEqual([]);
+    });
+    workspace.send(sessionId, signInFailure);
+    expect(workspace.notices()).toEqual([]);
+    expect(workspace.router.needsBranchReplay(sessionId)).toBe(true);
+    await workspace.router.replay(sessionId, async () => { workspace.send(sessionId, complete, signInFailure); });
+    expect(workspace.notices().length).toBe(1);
+  }
+});
+
+test("a_live_run_error_raises_a_notice_and_a_replayed_one_does_not", async () => {
+  const sessionId = "session" as SessionId;
+  const workspace = routedWorkspace(sessionId);
+  const failed = {
+    sessionUpdate: "state_update", state: "idle", stopReason: "error",
+    error: { code: -32000, message: "provider answered 401", data: { methodId: "chatgpt" } },
+  };
+  workspace.send(sessionId, failed);
+  expect(workspace.notices().map((notice) => [notice.signIn, notice.description])).toEqual([["chatgpt", "provider answered 401"]]);
+  // Any other error says what went wrong without offering a sign-in.
+  workspace.send(sessionId, { ...failed, error: { code: -32603, message: "boom" } });
+  expect(workspace.notices()[1]?.signIn).toBe(undefined);
+  await workspace.router.replay(sessionId, async () => { workspace.send(sessionId, failed); });
+  expect(workspace.notices().length).toBe(2);
 });

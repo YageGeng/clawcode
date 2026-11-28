@@ -1,4 +1,5 @@
-import { cleanup, computed, effect, signal, Text, View } from "nsh";
+import { cleanup, computed, effect, keymap, signal, Text, untracked, View } from "nsh";
+import type { InputRef } from "nsh";
 import type { JSX } from "nsh/jsx-runtime";
 import { t } from "nsh/i18n";
 
@@ -6,8 +7,10 @@ import type { SessionId } from "../client/acp/protocol";
 import type { PromptDraft } from "../client/acp/prompt";
 import { messageOf } from "../client/errors";
 import type { HostStore } from "../stores/host";
-import { IconButton } from "../ui/button";
+import { Button, IconButton } from "../ui/button";
+import { Icon } from "../ui/icon";
 import { SlashCommands } from "./SlashCommands";
+import { mainWindowFocused } from "../ui/windowFocus";
 import { Appear } from "../ui/appear";
 import { glideNextLayout } from "../ui/motion";
 import { Surface } from "../ui/surface";
@@ -36,11 +39,23 @@ export function Composer(props: {
   disabled?: boolean;
   /** What sits above the card: the context strip of a new Session. */
   context?: JSX.Element;
+  /** An earlier user message being edited: the composer shows its text in place of the draft, which comes back on cancel. */
+  editing?: Readonly<{ messageId: string; text: string; imageCount?: number }>;
+  /** Sends the edited message; resolves once it went out, rejects (the edit stays) when it could not. */
+  onEdit?: (draft: PromptDraft) => Promise<void>;
+  /** Leaves the edit; the composer has already restored the draft. */
+  onCancelEdit?: () => void;
+  /**
+   * Whether Escape outside the field may cancel the edit (default true). The Session view turns it off while a surface
+   * above the transcript (the inspector) takes Escape, so one press dismisses only the topmost thing.
+   */
+  escapeCancelsEdit?: boolean;
 }) {
   const draft = signal<PromptDraft>({ text: "", images: [] });
   const picking = signal(false);
   const sending = signal(false);
   const imageError = signal("");
+  let composerInput: InputRef | undefined;
   let disposed = false;
   cleanup(() => { disposed = true; });
   const running = () => props.sessionId !== null && props.host.running(props.sessionId);
@@ -51,6 +66,37 @@ export function Composer(props: {
   // The round button grows in only when it swaps (send ↔ stop), not when the composer first shows.
   let swapped = false;
   setTimeout(() => (swapped = true), 0);
+
+  // The draft from before the first edit; a second edit keeps it, so cancelling always returns what the user was writing.
+  let stashed: PromptDraft | undefined;
+  effect(() => {
+    const editing = props.editing;
+    if (!editing) return;
+    untracked(() => {
+      stashed ??= draft();
+      draft.set({ text: editing.text, images: [] });
+    });
+    // Move keyboard focus and the caret into the composer as soon as an earlier prompt is picked for editing.
+    const focusTimer = setTimeout(() => {
+      if (disposed) return;
+      composerInput?.focus();
+      composerInput?.setSelection(editing.text.length);
+    }, 0);
+    return () => clearTimeout(focusTimer);
+  });
+  /** Leaves the edit and puts back the draft it replaced. */
+  const cancelEdit = () => {
+    draft.set(stashed ?? { text: "", images: [] });
+    stashed = undefined;
+    props.onCancelEdit?.();
+  };
+  // Allow Escape to cancel an active message edit even when keyboard focus is outside the text field.
+  effect(() => {
+    // Not while another window (Settings) has the keys: this binding sits in the app root, which every window hears.
+    if (props.editing && props.escapeCancelsEdit !== false && !sending() && !pending() && mainWindowFocused()) {
+      return keymap.bind("escape", cancelEdit, { when: "notEditing" });
+    }
+  });
 
   // Keep a failed draft intact at the host while the user is composing a different one.
   effect(() => {
@@ -83,6 +129,21 @@ export function Composer(props: {
   const send = async () => {
     if (!canSend()) return;
     const submission = draft();
+    if (props.editing && props.onEdit) {
+      // The edit stays until the branch has moved: a failure leaves the edited text to retry.
+      sending.set(true);
+      try {
+        await props.onEdit(submission);
+        // The edit went out: give back what the user was writing before it.
+        if (!disposed && draft() === submission) draft.set(stashed ?? { text: "", images: [] });
+        stashed = undefined;
+      } catch {
+        console.warn("Could not send the edited message");
+      } finally {
+        if (!disposed) sending.set(false);
+      }
+      return;
+    }
     const firstPrompt = props.onConfigureNew !== undefined;
     /** Every edit replaces the draft, including editing back to the same text. */
     const unchanged = () => !disposed && draft() === submission;
@@ -113,6 +174,13 @@ export function Composer(props: {
         {(prompt) => <PermissionCard prompt={prompt()} onAnswer={(optionId) => answer(prompt().key, optionId)} />}
       </If>
       <Surface variant="floating">
+        <If when={props.editing}>
+          <View class="flex-row items-center gap-2 rounded-(--radius) bg-muted/75 py-1 pl-2.5 pr-1">
+            <Icon name="pencil" size="sm" color="foreground" />
+            <Text class={`min-w-0 flex-1 truncate ${type.meta} font-medium text-foreground`}>{props.editing?.imageCount ? t("edit.bannerImages", { count: props.editing.imageCount }) : t("edit.banner")}</Text>
+            <Button label={t("edit.cancel")} size="sm" variant="ghost" disabled={sending()} onPress={cancelEdit} />
+          </View>
+        </If>
         <If when={draft().images.length > 0}>
           <AttachmentStrip images={draft().images} onRemove={(id) => {
             draft.update((previous) => ({ ...previous, images: previous.images.filter((image) => image.id !== id) }));
@@ -122,10 +190,11 @@ export function Composer(props: {
         <If when={imageError()}>
           {(error) => <Text role="alert" class={`px-1 ${type.meta} text-destructive`}>{error()}</Text>}
         </If>
-        <SlashCommands host={props.host} sessionId={props.sessionId} value={draft().text}
+        <SlashCommands host={props.host} sessionId={props.sessionId} value={draft().text} inputRef={(node) => { composerInput = node; }}
           disabled={props.disabled === true || sending() || picking() || running()} preparing={props.preparing === true} onPrepare={props.onConfigureNew}
           onChange={(text) => draft.update((previous) => ({ ...previous, text }))} onSubmit={send}
-          onEscape={pending() ? () => { const request = pending(); if (request) answer(request.key, undefined); } : undefined} />
+          onEscape={pending() ? () => { const request = pending(); if (request) answer(request.key, undefined); }
+            : props.editing && !sending() ? cancelEdit : undefined} />
         <SessionControls host={props.host} sessionId={props.sessionId} disabled={props.disabled === true} turnBusy={sending() || running()}
           picking={picking()} atImageLimit={draft().images.length >= imageLimit} onAttach={() => void attach()}
           preparing={props.preparing === true} onConfigureNew={props.onConfigureNew}>

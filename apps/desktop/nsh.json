@@ -11,8 +11,14 @@
   },
   "window": {
     "title": "Clawcode",
-    "defaultSize": { "width": 1200, "height": 800 },
-    "minSize": { "width": 800, "height": 560 },
+    "defaultSize": {
+      "width": 1200,
+      "height": 800
+    },
+    "minSize": {
+      "width": 800,
+      "height": 560
+    },
     "restoreBounds": true
   },
   "capabilities": {
@@ -20,7 +26,16 @@
     "clipboard": true,
     "picker": true,
     "process": {
-      "env": ["CLAW_CONFIG", "CLAW_DESKTOP_RELAY"]
+      "env": [
+        "CLAW_CONFIG",
+        "CLAW_DESKTOP_RELAY"
+      ]
+    },
+    "windows": true,
+    "openUrl": {
+      "schemes": [
+        "https"
+      ]
     }
   }
 }

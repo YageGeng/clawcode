@@ -1247,11 +1247,14 @@ impl RunScope<'_> {
         // A non-retryable or exhausted failure ends the Run after the
         // failed Turn has been fully settled.
         if let Some(failure) = settled.failure {
+            // A rejected credential names the sign-in that resolves it, so the
+            // client can offer it.
             return Ok(Some(turn_loop.finish(
                 self.run_id,
                 turn_id.clone(),
                 AgentOutcome::Failed {
                     message: failure.summary,
+                    sign_in: failure.sign_in,
                 },
                 None,
             )));
@@ -1633,6 +1636,7 @@ impl RunScope<'_> {
             Err(error) => {
                 let outcome = AgentOutcome::Failed {
                     message: error.to_string(),
+                    sign_in: None,
                 };
                 settlement
                     .turn_id(first_turn_id)

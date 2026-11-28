@@ -458,10 +458,15 @@ impl ConfiguredModel {
     }
 
     /// Records a failed request's status so a rejected credential requires a sign-in.
-    pub fn note_failure_status(&self, status: Option<u16>) {
-        if let Some(auth) = &self.auth {
-            auth.note_failure_status(status);
-        }
+    ///
+    /// Returns the login method that resolves the failure when the status
+    /// rejected this provider's credential.
+    pub fn note_failure_status(&self, status: Option<u16>) -> Option<String> {
+        let auth = self.auth.as_ref()?;
+        auth.note_failure_status(status);
+        (status == Some(401))
+            .then(|| self.login_method().map(|method| method.id.clone()))
+            .flatten()
     }
 
     /// Resolves the provider's shared sign-in state through the base transport.

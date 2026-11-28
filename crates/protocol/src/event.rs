@@ -22,6 +22,10 @@ pub enum AgentOutcome {
     Failed {
         /// Stable human-readable failure summary.
         message: String,
+        /// The login method that resolves the failure: the provider rejected
+        /// its credential, so the user must sign in again.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        sign_in: Option<String>,
     },
 }
 

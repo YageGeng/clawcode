@@ -256,8 +256,9 @@ impl ProviderModel {
                 }?;
                 let Some(event) = event else { break; };
                 let event = event.map_err(|error| {
-                    let failure = target.failure("stream", error);
-                    configured.note_failure_status(failure.status);
+                    let mut failure = target.failure("stream", error);
+                    // A rejected credential names the sign-in that fixes it.
+                    failure.sign_in = configured.note_failure_status(failure.status);
                     ModelError::Stream(failure)
                 })?;
                 match event {

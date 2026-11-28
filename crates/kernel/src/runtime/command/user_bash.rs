@@ -197,6 +197,7 @@ impl Kernel {
                 (
                     AgentOutcome::Failed {
                         message: error.to_string(),
+                        sign_in: None,
                     },
                     false,
                 )

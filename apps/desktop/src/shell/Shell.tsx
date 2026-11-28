@@ -1,5 +1,6 @@
 import { effect, signal, Text, View } from "nsh";
 import { currentWindow, isAvailable } from "nsh/desktop";
+import type { WindowRef } from "nsh/desktop";
 import { t } from "nsh/i18n";
 
 import { messageOf } from "../client/errors";
@@ -9,7 +10,8 @@ import { remoteError } from "../stores/remote";
 import type { RemoteStore } from "../stores/remote";
 import { Button, IconButton } from "../ui/button";
 import { SessionView } from "../session/SessionView";
-import { SettingsDialog } from "../settings/SettingsDialog";
+import { SettingsWindow } from "../settings/SettingsWindow";
+import type { SettingsPage } from "../settings/SettingsWindow";
 import type { AppStore } from "../stores/app";
 import type { HostFailure, HostPhase } from "../stores/host";
 import { createPinStore } from "../stores/pins";
@@ -62,12 +64,22 @@ export function Shell(props: { store: AppStore; settings: SettingsStore; remote?
   configureShellWindow();
   const sidebarOpen = signal(true);
   const settingsOpen = signal(false);
+  const settingsPage = signal<SettingsPage>("general");
+  // The sign-in a notice asked for; the Providers page starts it and clears it.
+  const pendingSignIn = signal<string | undefined>(undefined);
+  let settingsWindow: WindowRef | undefined;
+  /** Opens the settings window at `page`, or brings the open one forward and shows `page` there. */
+  const openSettings = (page: SettingsPage) => {
+    settingsPage.set(page);
+    if (settingsOpen()) settingsWindow?.focus();
+    else settingsOpen.set(true);
+  };
   // The working directory a new Session starts in; the newest workspace until the user picks one.
   const chosenCwd = signal<ReadonlyMap<string, string>>(new Map());
   const host = () => props.store.currentHost();
   const cwd = () => chosenCwd().get(host().info.id) ?? groupByWorkspace(host().sessions())[0]?.cwd ?? null;
   const remotePage = signal<RemotePage>(null);
-  /** Moves between local device settings, invitations and adding a computer. */
+  /** Opens or closes the main window's add-a-remote-computer dialog. */
   const navigateRemote = (next: RemotePage) => {
     props.remote?.clearError();
     remotePage.set(next);
@@ -94,7 +106,13 @@ export function Shell(props: { store: AppStore; settings: SettingsStore; remote?
   void pins.load();
   effect(() => {
     for (const notice of host().notices()) {
-      toasts.show({ title: notice.title, description: notice.description, tone: "danger" });
+      // Only this computer's providers can be signed in to here; a paired computer manages its own.
+      const method = host().info.kind === "local" ? notice.signIn : undefined;
+      toasts.show({ title: notice.title, description: notice.description, tone: method === undefined ? "danger" : "warning",
+        ...(method === undefined ? {} : { action: { label: t("auth.signIn"), onPress: () => {
+          pendingSignIn.set(method);
+          openSettings("providers");
+        } } }) });
       host().dismissNotice(notice.id);
     }
   });
@@ -134,10 +152,7 @@ export function Shell(props: { store: AppStore; settings: SettingsStore; remote?
   const nav = () => (
     <NavBar store={props.store} onToggleSidebar={toggleSidebar}
       connected={props.remote?.snapshot?.enabled ? props.remote.snapshot.online.length : undefined}
-      onShowDevices={() => {
-        if (host().info.kind !== "local") props.store.selectHost("local");
-        navigateRemote("sharing");
-      }} />
+      onShowDevices={() => openSettings("remote")} />
   );
   /** Shows or hides the sidebar, gliding the layout unless the user asked for less motion. */
   const toggleSidebar = () => {
@@ -149,7 +164,7 @@ export function Shell(props: { store: AppStore; settings: SettingsStore; remote?
     <View class="flex-1 bg-sidebar">
       <View class="min-h-0 flex-1 flex-row">
         <If when={sidebarOpen()}>
-          <Sidebar header={nav()} store={props.store} pins={pins} onAddHost={addHost} onOpenSettings={() => settingsOpen.set(true)}
+          <Sidebar header={nav()} store={props.store} pins={pins} onAddHost={addHost} onOpenSettings={() => openSettings("general")}
             onError={(title, description) => toasts.show({ title, description, tone: "danger" })} />
         </If>
         {/* Below the system title bar the sidebar and the main area meet flush; one vertical line divides them. */}
@@ -211,7 +226,7 @@ export function Shell(props: { store: AppStore; settings: SettingsStore; remote?
                     onOpenSession={(id) => props.store.openSession(host().info.id, id)}
                     leading={sidebarOpen() ? undefined : nav()}
                     status={connection()}
-                    modalOpen={settingsOpen() || remotePage() !== null || !!props.remote?.snapshot?.pending.length}
+                    modalOpen={remotePage() !== null || !!props.remote?.snapshot?.pending.length}
                   />
                 )}
               </Each>
@@ -219,9 +234,12 @@ export function Shell(props: { store: AppStore; settings: SettingsStore; remote?
           </If>
         </View>
       </View>
-      <SettingsDialog open={settingsOpen() && !remotePage() && !props.remote?.snapshot?.pending.length}
-        settings={props.settings} onClose={() => settingsOpen.set(false)}
-        onRemoteSettings={props.remote && host().info.kind === "local" ? () => navigateRemote("sharing") : undefined} />
+      <If when={settingsOpen()}>
+        <SettingsWindow settings={props.settings} remote={props.remote} page={settingsPage()} onPage={(page) => settingsPage.set(page)}
+          localHost={props.store.hosts().find((item) => item.info.kind === "local")}
+          startSignIn={pendingSignIn()} onSignInStarted={() => pendingSignIn.set(undefined)}
+          windowRef={(node) => { settingsWindow = node; }} onClose={() => { settingsOpen.set(false); settingsWindow = undefined; }} />
+      </If>
       <If when={props.remote}>
         {(remote) => <RemoteDialogs remote={remote()} page={remotePage()}
           localReady={props.store.hosts().some((item) => item.info.kind === "local" && item.phase().kind === "ready")}

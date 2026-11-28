@@ -21,6 +21,13 @@ import { WorkspacePanel } from "./WorkspacePanel";
 import type { ChangeOpener, ViewTurnChange } from "./ChangeCard";
 import { Popover, Tooltip } from "../ui/menu";
 import { TurnRow } from "./TurnRow";
+import { AcpRequestError } from "../client/acp/connection";
+import { messageOf } from "../client/errors";
+import { TrajectoryLog } from "../client/trajectory";
+import { TrajectoryView } from "../trajectory/TrajectoryView";
+import { Segmented } from "../ui/selection";
+import { mainWindowFocused } from "../ui/windowFocus";
+import type { TrajectoryPanel } from "./WorkspacePanel";
 import type { TurnSource } from "./TurnRow";
 
 /** Within this many points of the end the list counts as at the bottom and follows new content. */
@@ -32,6 +39,9 @@ const DETAILS_FLOAT_MIN_WIDTH = 760 + DETAILS_GUTTER + 16;
 
 /** Remembers the user's dragged Changes inspector width across Session switches. */
 const inspectorWidth = signal(420);
+
+/** Which view each Session shows, by host and Session; in memory only, the conversation by default. */
+const viewModes = signal<ReadonlyMap<string, "conversation" | "trajectory">>(new Map());
 
 /** One open Session: its header, its transcript as turns, and the composer. */
 export function SessionView(props: {
@@ -47,7 +57,6 @@ export function SessionView(props: {
   // JSX slots are getters that build a new element on every read, `If`'s accessor included: read each one once.
   const leading = computed(() => props.leading);
   const status = computed(() => props.status);
-  const floatDetails = computed(() => transcriptWidth() >= DETAILS_FLOAT_MIN_WIDTH);
   const detailsOpen = signal(false);
   const details = () => (
     <SessionDetails host={props.host} sessionId={props.sessionId} cwd={summary()?.cwd} deviceName={props.deviceName}
@@ -73,7 +82,33 @@ export function SessionView(props: {
     setTimeout(() => list?.scrollToEnd({ animated: false }), 0);
   });
 
+  // The earlier user message the composer is editing; a new branch replaces it once the edit is sent.
+  // Its images are not kept in the transcript, so the banner says they won't be sent again.
+  const editing = signal<{ messageId: MessageId; text: string; imageCount?: number } | undefined>(undefined);
+  const editingActions = {
+    busy: () => props.host.running(props.sessionId),
+    edit: (messageId: MessageId) => {
+      const message = session()?.messages.get(messageId);
+      if (message) editing.set({ messageId, text: message.text, imageCount: message.imageCount });
+    },
+    fork: async (messageId: MessageId) => props.onOpenSession(await props.host.fork(props.sessionId, messageId)),
+    target: () => editing()?.messageId,
+    dropped: (turnKey: string) => droppedTurns().has(turnKey),
+  };
+  // The turns after the one being edited: the new branch leaves them behind.
+  const droppedTurns = computed(() => {
+    const target = editing()?.messageId;
+    if (target === undefined) return new Set<string>();
+    const list = turns();
+    const at = list.findIndex((turn) => turn.userMessageId === target);
+    return new Set(at < 0 ? [] : list.slice(at + 1).map((turn) => turn.key));
+  });
+  // A subagent's Session is driven by its parent; the listing that says so may arrive after the view mounts.
+  const subagent = computed(() => !!summary()?.owner);
   const source: TurnSource = {
+    get editing() {
+      return subagent() ? undefined : editingActions;
+    },
     message: (id: MessageId) => session()?.messages.get(id),
     tool: (id: ToolCallId) => session()?.tools.get(id),
     terminal: (id) => session()?.terminals.get(id),
@@ -89,6 +124,38 @@ export function SessionView(props: {
   };
 
   const panel = computed(() => props.host.panels().get(props.sessionId));
+
+  const modeKey = `${props.host.info.id}\n${props.sessionId}`;
+  const mode = computed(() => viewModes().get(modeKey) ?? "conversation");
+  // The card floats inside the conversation, so the trajectory, which hides it, uses the header popover instead.
+  const floatDetails = computed(() => mode() === "conversation" && transcriptWidth() >= DETAILS_FLOAT_MIN_WIDTH);
+  // The trajectory is read the first time it is shown and kept while this Session stays open.
+  let log: TrajectoryLog | undefined;
+  const trajectoryLog = () => (log ??= new TrajectoryLog(
+    (query) => props.host.trajectory(props.sessionId, query),
+    (error) => ({ kind: error instanceof AcpRequestError && error.reason === "historyUnavailable" ? "unavailable" : "failed", detail: messageOf(error) }),
+  ));
+  const selectedRecord = signal<string | undefined>(undefined);
+  /**
+   * Selects a trajectory record and shows it in the inspector's Record tab. A narrow window shows the panel in place of
+   * the trajectory, so there a press only selects, and pressing the selected record again opens its details.
+   */
+  const selectRecord = (recordId: string) => {
+    const again = selectedRecord() === recordId;
+    selectedRecord.set(recordId);
+    if (!compact() || panel() || again) props.host.setPanel(props.sessionId, { ...panel(), tab: "record" });
+  };
+  const trajectoryPanel = computed<TrajectoryPanel | undefined>(() => (mode() === "trajectory"
+    ? { sessionId: props.sessionId, log: trajectoryLog(), selected: () => selectedRecord(), onSelect: selectRecord } : undefined));
+  /** Switches between the conversation and the trajectory; the Record tab leaves with the trajectory. */
+  const setMode = (next: "conversation" | "trajectory") => {
+    viewModes.update((modes) => new Map(modes).set(modeKey, next));
+    if (next === "conversation" && panel()?.tab === "record") props.host.setPanel(props.sessionId, { ...panel(), tab: "files" });
+  };
+  // Ctrl+Shift+T (Cmd+Shift+T on macOS) switches views while no modal dialog is above the Session and the main window has the keys.
+  effect(() => {
+    if (!props.modalOpen && mainWindowFocused()) return keymap.bind("mod+shift+t", () => setMode(mode() === "trajectory" ? "conversation" : "trajectory"));
+  });
   const selection = computed(() => panel()?.change);
   const turnKey = computed(() => selection()?.turnKey);
   const turnIndex = computed(() => {
@@ -135,9 +202,9 @@ export function SessionView(props: {
     props.host.setPanel(props.sessionId, { tab: "changes", change: sameFile ? current
       : { turnKey: turn.key, path: change.path, editId: change.edits[0].id } });
   };
-  // Bind Escape whenever the inspector is open and no modal dialog sits above the Session.
+  // Bind Escape whenever the inspector is open, no modal dialog sits above the Session and the main window has the keys.
   effect(() => {
-    if (!props.modalOpen && panel()) return keymap.bind("escape", closePanel, { when: compact() ? "always" : "notEditing" });
+    if (!props.modalOpen && panel() && mainWindowFocused()) return keymap.bind("escape", closePanel, { when: compact() ? "always" : "notEditing" });
   });
   return (
     <View class="flex-1" onLayout={({ bounds }) => compact.set(bounds.size.width < 760)}>
@@ -160,9 +227,16 @@ export function SessionView(props: {
                   <View class="h-3.5"><Separator vertical /></View>
                 </View>
               </If>
+              <Segmented accessibilityLabel={t("trajectory.toggle")} value={mode()}
+                items={[
+                  { value: "conversation", label: t("trajectory.conversation"), icon: "message-square" },
+                  { value: "trajectory", label: t("trajectory.trajectory"), icon: "chart-gantt" },
+                ]}
+                onChange={(value) => setMode(value === "trajectory" ? "trajectory" : "conversation")} />
               <If when={summary()?.cwd}>
                 {(cwd) => <Badge label={workspaceName(cwd())} />}
               </If>
+              <View class="h-3.5"><Separator vertical /></View>
               <View class="flex-row items-center gap-1">
                 <If when={!floatDetails()}>
                   <Popover class="w-[280px] p-1.5" offset={18} open={detailsOpen()} onOpenChange={(open) => detailsOpen.set(open)} trigger={
@@ -177,7 +251,12 @@ export function SessionView(props: {
               </View>
             </View>
           </View>
-          <View class="flex-1" onLayout={({ bounds }) => transcriptWidth.set(bounds.size.width)}>
+          <If when={mode() === "trajectory"}>
+            <TrajectoryView host={props.host} sessionId={props.sessionId} log={trajectoryLog()} selectedId={selectedRecord()}
+              onSelect={selectRecord} modalOpen={props.modalOpen} />
+          </If>
+          {/* Hidden, not unmounted, behind the trajectory: the conversation keeps its scroll position and open parts. */}
+          <View class={mode() === "trajectory" ? "hidden" : "flex-1"} onLayout={({ bounds }) => transcriptWidth.set(bounds.size.width)}>
             <List
               ref={list}
               each={turns()}
@@ -218,9 +297,16 @@ export function SessionView(props: {
               </Appear>
             </If>
           </View>
-          <View class={floatDetails() ? "pr-[296px]" : ""}>
+          <View class={`${mode() === "trajectory" ? "border-t border-border pt-3" : ""} ${floatDetails() ? "pr-[296px]" : ""}`}>
             <Composer host={props.host} disabled={props.host.phase().kind !== "ready"} sessionId={props.sessionId}
-              onSend={(draft) => props.host.prompt(props.sessionId, draft.text, draft.images)} />
+              onSend={(draft) => props.host.prompt(props.sessionId, draft.text, draft.images)}
+              editing={editing()} onCancelEdit={() => editing.set(undefined)} escapeCancelsEdit={!panel()}
+              onEdit={async (draft) => {
+                const target = editing();
+                if (!target) return;
+                await props.host.editPrompt(props.sessionId, target.messageId, draft);
+                editing.set(undefined);
+              }} />
           </View>
         </SplitPane>
         <SplitPane
@@ -234,7 +320,7 @@ export function SessionView(props: {
           <If when={panel()}>
             {(active) => <WorkspacePanel host={props.host} cwd={summary()?.cwd} panel={active()} compact={compact()} modalOpen={props.modalOpen}
               status={compact() ? status() : undefined}
-              turns={turns()} file={file()} turnNumber={turnIndex() + 1} onClose={closePanel}
+              turns={turns()} file={file()} turnNumber={turnIndex() + 1} onClose={closePanel} trajectory={trajectoryPanel()}
               onChange={(next) => props.host.setPanel(props.sessionId, next)} />}
           </If>
         </SplitPane>

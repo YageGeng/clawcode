@@ -14,6 +14,7 @@ import { Field } from "../ui/input";
 import { Menu, MenuItem, Popover, Tooltip } from "../ui/menu";
 import { Select, StepSlider } from "../ui/selection";
 import { type } from "../ui/tokens";
+import { mainWindowFocused } from "../ui/windowFocus";
 
 /** Known protocol values have UI translations; the host supplies model names and any unfamiliar choices. */
 const translatedChoices: Readonly<Record<string, readonly string[]>> = {
@@ -105,7 +106,8 @@ export function SessionControls(props: {
   // A pointer can open the popup without focusing GTK's slider thumb. Left and Right still step the visible
   // slider, except while the nested select owns navigation or the host is applying the previous edit.
   effect(() => {
-    if (!matches(popup()) || modelMenuOpen() || locked()) return;
+    // App-root bindings reach every window: keep the arrows for the main window.
+    if (!matches(popup()) || modelMenuOpen() || locked() || !mainWindowFocused()) return;
     const items = levels();
     const index = items.findIndex((item) => item.value === level()?.currentValue);
     if (index < 0 || items.length < 2) return;

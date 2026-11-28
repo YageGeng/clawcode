@@ -125,3 +125,225 @@ test("deleting_a_session_removes_it_from_the_list", async () => {
   expect(seen).toEqual([{ method: "session/delete", params: { sessionId: "s2" } }]);
   expect(host.sessions().map((session) => session.sessionId)).toEqual(["s1"]);
 });
+
+test("host_reads_sign_in_methods_and_their_statuses", async () => {
+  const peer = acpPeer(sessions);
+  const host = createHostStore(LOCAL_HOST, new MemoryTransport((frame, transport) => {
+    const request = JSON.parse(frame) as { id?: number; method?: string };
+    const reply = (result: unknown) => transport.deliver(JSON.stringify({ jsonrpc: "2.0", id: request.id, result }));
+    if (request.method === "initialize") {
+      return reply({ protocolVersion: 2, authMethods: [
+        // ACP v2's wire shape, as the backend sends it.
+        { type: "agent", methodId: "openai-codex", name: "ChatGPT", description: "Sign in with your ChatGPT plan" },
+        { id: "broken" },
+      ] });
+    }
+    if (request.method === "_clawcode/auth/status") {
+      return reply([{ methodId: "openai-codex", status: "signInRequired" }, { methodId: "copilot", status: "weird" }]);
+    }
+    peer(frame, transport);
+  }));
+  await host.start();
+  // A method without a name is not one the user can pick.
+  expect(host.authMethods()).toEqual([{ id: "openai-codex", name: "ChatGPT", description: "Sign in with your ChatGPT plan" }]);
+  // An unknown status reads as undecided rather than failing the whole list.
+  expect(await host.signInStatuses()).toEqual([
+    { methodId: "openai-codex", status: "signInRequired" }, { methodId: "copilot", status: "unknown" },
+  ]);
+});
+
+/** A host whose peer runs `auth/login` through a URL elicitation, recording what it receives. */
+async function signInHost() {
+  const received: Array<Record<string, unknown>> = [];
+  let loginId: number | undefined;
+  let transportRef: MemoryTransport | undefined;
+  const peer = acpPeer(sessions);
+  const host = createHostStore(LOCAL_HOST, new MemoryTransport((frame, transport) => {
+    transportRef = transport;
+    const message = JSON.parse(frame) as Record<string, unknown> & { id?: number; method?: string };
+    received.push(message);
+    const reply = (result: unknown) => transport.deliver(JSON.stringify({ jsonrpc: "2.0", id: message.id, result }));
+    if (message.method === "initialize") {
+      return reply({ protocolVersion: 2, authMethods: [{ type: "agent", methodId: "openai-codex", name: "ChatGPT" }] });
+    }
+    if (message.method === "auth/login") {
+      loginId = message.id;
+      transport.deliver(JSON.stringify({ jsonrpc: "2.0", id: "agent-1", method: "elicitation/create", params: {
+        mode: "url", requestId: message.id, elicitationId: "e1", url: "https://example.com/device",
+        message: "Open the page and enter ABCD-1234", _meta: { clawcode: { userCode: "ABCD-1234", methodName: "ChatGPT" } },
+      } }));
+      return;
+    }
+    if (message.method === "session/prompt") {
+      return transport.deliver(JSON.stringify({ jsonrpc: "2.0", id: message.id,
+        error: { code: -32000, message: "Authentication required", data: { methodId: "openai-codex" } } }));
+    }
+    peer(frame, transport);
+  }));
+  await host.start();
+  /** Finishes the sign-in as the backend does: withdraw the device code, then answer `auth/login`. */
+  const complete = () => {
+    transportRef!.deliver(JSON.stringify({ jsonrpc: "2.0", method: "$/cancel_request", params: { requestId: "agent-1" } }));
+    transportRef!.deliver(JSON.stringify({ jsonrpc: "2.0", id: loginId, result: {} }));
+  };
+  return { host, received, complete, loginId: () => loginId, deliver: (message: unknown) => transportRef!.deliver(JSON.stringify(message)) };
+}
+
+test("initialize_offers_url_elicitation_for_sign_in", async () => {
+  const { received } = await signInHost();
+  const init = received.find((message) => message.method === "initialize") as { params: { capabilities: { elicitation?: unknown } } };
+  expect(init.params.capabilities.elicitation).toEqual({ url: {} });
+});
+
+test("a_sign_in_shows_its_device_code_until_the_backend_finishes", async () => {
+  const { host, complete } = await signInHost();
+  const done = host.signIn("openai-codex");
+  await new Promise((resolve) => setTimeout(resolve, 0));
+  expect(host.signInFlow()).toEqual({ methodId: "openai-codex", code: {
+    url: "https://example.com/device", userCode: "ABCD-1234", message: "Open the page and enter ABCD-1234",
+  } });
+  complete();
+  await done;
+  expect(host.signInFlow()).toBe(null);
+});
+
+test("cancelling_a_sign_in_declines_the_code_and_cancels_the_login", async () => {
+  const { host, received, loginId } = await signInHost();
+  const done = host.signIn("openai-codex").catch(() => "cancelled");
+  await new Promise((resolve) => setTimeout(resolve, 0));
+  host.cancelSignIn();
+  expect(await done).toBe("cancelled");
+  await new Promise((resolve) => setTimeout(resolve, 0));
+  expect(received.find((message) => message.id === "agent-1")?.result).toEqual({ action: "decline" });
+  expect((received.find((message) => message.method === "$/cancel_request") as { params: { requestId: number } }).params.requestId)
+    .toBe(loginId()!);
+  expect(host.signInFlow()).toBe(null);
+});
+
+test("withdrawing_an_old_device_code_keeps_the_fresh_one", async () => {
+  const { host, received, deliver, loginId } = await signInHost();
+  const done = host.signIn("openai-codex").catch(() => "cancelled");
+  await new Promise((resolve) => setTimeout(resolve, 0));
+  // The host issues a fresh code before it withdraws the expired one.
+  deliver({ jsonrpc: "2.0", id: "agent-2", method: "elicitation/create", params: {
+    mode: "url", requestId: loginId(), elicitationId: "e2", url: "https://example.com/device2", message: "Enter WXYZ-9876", _meta: { clawcode: { userCode: "WXYZ-9876" } },
+  } });
+  deliver({ jsonrpc: "2.0", method: "$/cancel_request", params: { requestId: "agent-1" } });
+  await new Promise((resolve) => setTimeout(resolve, 0));
+  expect(host.signInFlow()?.code?.userCode).toBe("WXYZ-9876");
+  host.cancelSignIn();
+  expect(await done).toBe("cancelled");
+  await new Promise((resolve) => setTimeout(resolve, 0));
+  expect(received.find((message) => message.id === "agent-2")?.result).toEqual({ action: "decline" });
+});
+
+/** Unrelated or malformed scopes must never replace the login's device card or be declined as its code. */
+test("a_sign_in_cancels_unrelated_url_elicitations_without_claiming_them", async () => {
+  const { host, received, deliver, loginId } = await signInHost();
+  const done = host.signIn("openai-codex").catch(() => "cancelled");
+  const code = host.signInFlow()?.code;
+  const scopes = [
+    { requestId: loginId()! + 1 },
+    { requestId: String(loginId()) },
+    { sessionId: "s1", toolCallId: "tool-1" },
+    { sessionId: "s1", requestId: loginId() },
+    { requestId: loginId(), toolCallId: "tool-1" },
+    {},
+  ];
+  for (const [index, scope] of scopes.entries()) {
+    const id = `unrelated-${index}`;
+    deliver({ jsonrpc: "2.0", id, method: "elicitation/create", params: {
+      mode: "url", ...scope, elicitationId: id, url: "https://example.com/unrelated", message: "An unrelated tool request",
+    } });
+  }
+  await new Promise((resolve) => setTimeout(resolve, 0));
+  expect(host.signInFlow()?.code).toEqual(code);
+  host.cancelSignIn();
+  expect(await done).toBe("cancelled");
+  await new Promise((resolve) => setTimeout(resolve, 0));
+  for (const index of scopes.keys()) {
+    expect(received.find((message) => message.id === `unrelated-${index}`)?.result).toEqual({ action: "cancel" });
+  }
+  expect(received.find((message) => message.id === "agent-1")?.result).toEqual({ action: "decline" });
+});
+
+/** Late elicitations from a cancelled login cannot become a retry's device code. */
+test("retrying_sign_in_rejects_the_previous_login_scope", async () => {
+  const { host, received, deliver, loginId, complete } = await signInHost();
+  const first = host.signIn("openai-codex").catch(() => "cancelled");
+  const oldId = loginId();
+  host.cancelSignIn();
+  // Cancellation revokes ownership immediately, before the login Promise's continuation.
+  deliver({ jsonrpc: "2.0", id: "after-cancel", method: "elicitation/create", params: {
+    mode: "url", requestId: oldId, elicitationId: "late-cancel", url: "https://example.com/old",
+  } });
+  expect(await first).toBe("cancelled");
+  const retry = host.signIn("openai-codex");
+  expect(loginId() === oldId).toBe(false);
+  deliver({ jsonrpc: "2.0", id: "old-login", method: "elicitation/create", params: {
+    mode: "url", requestId: oldId, elicitationId: "old", url: "https://example.com/old",
+  } });
+  await new Promise((resolve) => setTimeout(resolve, 0));
+  expect(host.signInFlow()?.code?.userCode).toBe("ABCD-1234");
+  expect(received.find((message) => message.id === "after-cancel")?.result).toEqual({ action: "cancel" });
+  expect(received.find((message) => message.id === "old-login")?.result).toEqual({ action: "cancel" });
+  complete();
+  await retry;
+  expect(host.signInFlow()).toBe(null);
+});
+
+/** A response ends request ownership in wire order, before the async login caller resumes. */
+test("a_completed_sign_in_rejects_late_elicitations", async () => {
+  const { host, received, deliver, loginId, complete } = await signInHost();
+  const done = host.signIn("openai-codex");
+  complete();
+  deliver({ jsonrpc: "2.0", id: "after-completion", method: "elicitation/create", params: {
+    mode: "url", requestId: loginId(), elicitationId: "late", url: "https://example.com/late",
+  } });
+  await done;
+  await new Promise((resolve) => setTimeout(resolve, 0));
+  expect(received.find((message) => message.id === "after-completion")?.result).toEqual({ action: "cancel" });
+  expect(host.signInFlow()).toBe(null);
+});
+
+test("a_prompt_that_needs_sign_in_names_the_method_in_its_notice", async () => {
+  const { host } = await signInHost();
+  await host.prompt("s1" as SessionId, "hello");
+  const notice = host.notices().at(-1)!;
+  expect(notice.signIn).toBe("openai-codex");
+  expect(notice.title).toBe("Sign in to ChatGPT to continue");
+});
+
+/** Opens a host whose `session/prompt` first reports a failed Run, then answers as `respond` says. */
+async function failingPromptHost(respond: (id: number, transport: MemoryTransport) => void) {
+  const peer = acpPeer(sessions);
+  const host = createHostStore(LOCAL_HOST, new MemoryTransport((frame, transport) => {
+    const message = JSON.parse(frame) as { id: number; method?: string };
+    if (message.method !== "session/prompt") return peer(frame, transport);
+    // The kernel settles a Run that failed before insertion, then the insertion channel refuses the prompt.
+    transport.deliver(JSON.stringify({ jsonrpc: "2.0", method: "session/update", params: {
+      sessionId: "s1",
+      update: { sessionUpdate: "state_update", state: "idle", stopReason: "error", error: { code: -32603, message: "store failed" } },
+      _meta: { clawcode: { turnId: "t1", timestampMs: "1", sequence: 1 } },
+    } }));
+    respond(message.id, transport);
+  }));
+  await host.start();
+  return host;
+}
+
+test("a_run_failed_before_insertion_raises_one_notice", async () => {
+  const host = await failingPromptHost((id, transport) => transport.deliver(JSON.stringify({
+    jsonrpc: "2.0", id, error: { code: -32603, message: "store failed" },
+  })));
+  await host.prompt("s1" as SessionId, "hello");
+  // Only the refused prompt speaks, and it hands the draft back.
+  expect(host.notices().map((notice) => notice.title)).toEqual(["The message was not sent"]);
+  expect(host.returnedDrafts().has("s1" as SessionId)).toBe(true);
+});
+
+test("a_run_that_fails_after_its_prompt_was_accepted_still_raises_its_notice", async () => {
+  const host = await failingPromptHost((id, transport) => transport.deliver(JSON.stringify({ jsonrpc: "2.0", id, result: { userMessageId: "m1" } })));
+  await host.prompt("s1" as SessionId, "hello");
+  expect(host.notices().map((notice) => notice.title)).toEqual(["The agent stopped with an error"]);
+});

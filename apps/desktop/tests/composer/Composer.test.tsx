@@ -113,15 +113,15 @@ test("switching_sessions_starts_a_clean_draft", async () => {
   expect(app.value("label:Message")).toBe("");
 });
 
-test("escape_closes_an_open_dialog_before_it_rejects", async () => {
+test("opening_and_closing_settings_leaves_a_pending_request_unanswered", async () => {
   const app = await openEntry();
   await send(app, "Asks", "hello");
   await app.waitFor("text:Run cargo test?");
+  // Settings open in a window of their own; closing it must not answer the request in the main window.
   await app.press("text:Settings");
-  await app.waitFor("text:Appearance");
-  // Escape belongs to the topmost surface: it closes Settings and leaves the request unanswered.
-  await app.keyboard.press("escape");
-  await app.waitUntil(() => !app.texts().includes("Appearance"));
+  await app.waitFor("label:Open workspaces in");
+  await app.window("settings").pressClose();
+  await app.waitUntil(() => !app.shows("label:Open workspaces in"));
   await app.wait(300);
   expect(app.texts().includes("Run cargo test?")).toBe(true);
   expect(app.texts().some((text) => text.startsWith("Chose"))).toBe(false);

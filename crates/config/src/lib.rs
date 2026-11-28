@@ -29,7 +29,7 @@ pub use llm::{
     ApiKeyConfig, LlmModel, LlmProvider, ProviderAuthConfig, ProviderId,
     ProviderType,
 };
-pub use loader::{ConfigError, ConfigHandle, load, load_from};
+pub use loader::{ConfigError, ConfigHandle, config_path, load, load_from};
 pub use logging::LoggingConfig;
 pub use mcp::{McpConfigError, McpOAuthConfig, McpServerConfig};
 pub use prompt::PromptPolicy;

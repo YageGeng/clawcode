@@ -22,6 +22,8 @@ export const motion = {
 export const motionClass = {
   /** A hover wash or a color change. */
   wash: "transition-colors duration-120 ease-out motion-reduce:transition-none",
+  /** Content dimming or coming back, such as turns an edit will replace. */
+  fade: "transition-opacity duration-180 ease-out motion-reduce:transition-none",
   /** A press: the whole control scales down on the soft settle. */
   press: "transition duration-180 ease-[cubic-bezier(0.22,1,0.36,1)] active:scale-[0.97] motion-reduce:transition-none motion-reduce:active:scale-100",
   /** A press on a square icon control. */

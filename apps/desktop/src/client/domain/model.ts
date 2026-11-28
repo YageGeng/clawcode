@@ -13,6 +13,15 @@ export type SessionSummary = Readonly<{
   owner?: SessionOwner;
 }>;
 
+/** A way to sign in to a model provider, as the host's `initialize` advertises it. */
+export type AuthMethod = Readonly<{ id: string; name: string; description?: string }>;
+
+/** Whether a sign-in method's stored credential is usable. */
+export type SignInState = "signedIn" | "signInRequired" | "unknown";
+
+/** One sign-in method's state, as `_clawcode/auth/status` reports it. */
+export type ProviderSignIn = Readonly<{ methodId: string; status: SignInState }>;
+
 /** The owner edge of a delegated Session: who spawned it and under which names. */
 export type SessionOwner = Readonly<{ sessionId: SessionId; name: string; nickname: string }>;
 
@@ -102,6 +111,16 @@ export type SessionNotice = Readonly<{
   sessionId: SessionId;
   title: string;
   description?: string;
+  /** The sign-in method to offer when the host refused the request until the user signs in. */
+  signIn?: string;
+  /** Raised by a Run that ended with an error, rather than by a refused request. */
+  fromRun?: boolean;
+}>;
+
+/** A provider sign-in in progress, with the device code once the host shows one. */
+export type SignInFlow = Readonly<{
+  methodId: string;
+  code?: Readonly<{ url: string; userCode?: string; message: string }>;
 }>;
 
 export type SessionRuntimeSnapshot = Readonly<{

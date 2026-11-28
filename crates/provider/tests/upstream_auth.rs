@@ -558,7 +558,13 @@ max_output_tokens=128
         let model =
             chatgpt_model(directory.path(), RecordingHttpClient::new(""));
         assert_eq!(model.sign_in_status().await, SignInStatus::SignedIn);
-        model.note_failure_status(Some(401));
+        // The rejection names the sign-in that resolves it.
+        let method_id = model.note_failure_status(Some(401));
+        assert_eq!(
+            method_id.as_deref(),
+            model.login_method().map(|method| method.id.as_str())
+        );
+        assert!(method_id.is_some());
         assert_eq!(model.sign_in_status().await, SignInStatus::SignInRequired);
     }
 
@@ -623,8 +629,8 @@ max_output_tokens=128
         seed(directory.path(), &live_record()).await;
         let model =
             chatgpt_model(directory.path(), RecordingHttpClient::new(""));
-        model.note_failure_status(Some(403));
-        model.note_failure_status(None);
+        assert_eq!(model.note_failure_status(Some(403)), None);
+        assert_eq!(model.note_failure_status(None), None);
         model.ensure_signed_in().await.expect("signed in");
     }
 

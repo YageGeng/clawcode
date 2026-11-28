@@ -103,6 +103,7 @@
       "text-body": "15px",
       "text-ui": "14px",
       "text-meta": "13px",
+      "text-title": "20px",
       "text-heading": "28px"
     },
     "dark": {
@@ -208,6 +209,7 @@
       "text-body": "15px",
       "text-ui": "14px",
       "text-meta": "13px",
+      "text-title": "20px",
       "text-heading": "28px"
     }
   }

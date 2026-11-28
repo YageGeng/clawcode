@@ -3,6 +3,8 @@ export const type = {
   body: "text-(length:--text-body) leading-[24px]",
   ui: "text-(length:--text-ui) leading-[20px]",
   meta: "text-(length:--text-meta) leading-[18px]",
+  /** A page title inside a window (Settings), and a code meant to be read off and typed elsewhere. */
+  title: "text-(length:--text-title) leading-[28px] font-semibold",
   heading: "text-(length:--text-heading) leading-[36px] font-medium",
 } as const;
 

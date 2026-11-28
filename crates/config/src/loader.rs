@@ -133,6 +133,11 @@ fn default_paths() -> Result<Vec<PathBuf>, ConfigError> {
     Ok(out)
 }
 
+/// The configuration file [`load`] reads first: the first existing default path, if any.
+pub fn config_path() -> Result<Option<PathBuf>, ConfigError> {
+    Ok(default_paths()?.into_iter().next())
+}
+
 /// Load configuration from the default search paths plus the `CLAW_` env layer.
 ///
 /// When no config file is found at any default path and no providers are set via

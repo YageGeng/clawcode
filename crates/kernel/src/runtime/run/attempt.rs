@@ -232,11 +232,23 @@ impl AssistantAttempt {
                                     )
                                     .build()
                             }
-                            // Retrying cannot help until the user signs in. Cancelled
-                            // is handled above; keep this fallback non-panicking so a
-                            // logic drift degrades gracefully.
-                            error @ (ModelError::AuthRequired { .. }
-                            | ModelError::Cancelled) => ModelFailure::builder()
+                            // Retrying cannot help until the user signs in, so the
+                            // failure names the sign-in that resolves it.
+                            ModelError::AuthRequired { method_id } => {
+                                ModelFailure::builder()
+                                    .summary(format!(
+                                        "sign-in required for provider {method_id}"
+                                    ))
+                                    .status(None)
+                                    .retry_disposition(
+                                        ModelRetryDisposition::NonRetryable,
+                                    )
+                                    .sign_in(method_id)
+                                    .build()
+                            }
+                            // Cancelled is handled above; keep this fallback
+                            // non-panicking so a logic drift degrades gracefully.
+                            error @ ModelError::Cancelled => ModelFailure::builder()
                                 .summary(error.to_string())
                                 .status(None)
                                 .retry_disposition(

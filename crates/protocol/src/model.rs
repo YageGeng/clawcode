@@ -271,6 +271,10 @@ pub struct ModelFailure {
     /// Accounting already reported by a failed terminal response; boxed to keep errors small.
     #[builder(default, setter(strip_option))]
     pub usage: Option<Box<ModelUsage>>,
+    /// The login method that resolves the failure when the provider rejected
+    /// its credential; the user must sign in again before retrying.
+    #[builder(default, setter(strip_option))]
+    pub sign_in: Option<String>,
 }
 
 impl ModelFailure {

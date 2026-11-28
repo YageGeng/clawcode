@@ -1,3 +1,6 @@
+auth:
+  required: "登录 %{name} 后才能继续"
+  signIn: 登录
 common:
   close: 关闭
   dismiss: 关闭通知
@@ -12,6 +15,40 @@ settings:
   language: 语言
   iconTheme: 图标主题
   iconThemeHelp: 为文件与文件夹关联的图标样式集合。
+  openIn: 默认打开方式
+  openInHelp: 会话详情里「在…中打开」默认使用的应用。
+  pages:
+    general: 通用
+    appearance: 外观
+    providers: Providers
+    remote: 远程控制
+    about: 关于
+  providers:
+    help: 这台电脑上各模型提供方的登录方式。
+    localOnly: 已配对电脑的凭据在那台电脑上管理。
+    unavailable: 启动本机后端后才能查看 Providers。
+    none: 这台电脑的后端没有提供登录方式。
+    failed: "无法读取登录状态：%{detail}"
+    waiting: 等待登录…
+    copyCode: 复制设备码
+    openBrowser: 在浏览器中打开
+    openFailed: "无法打开 %{url}（%{detail}），请复制到浏览器中打开。"
+    copyUrl: 复制地址
+    noBrowser: 没有能打开它的应用
+    signInFailed: "无法登录 %{name}：%{detail}"
+    status:
+      signedIn: 已登录
+      signInRequired: 未登录
+      unknown: 未知
+  about:
+    version: "版本 %{version}"
+    nsh: "NSH %{version}"
+    configFile: 配置文件
+    dataDir: 数据目录
+    logFile: 日志文件
+    notAvailable: 不可用
+    reveal: 在文件管理器中显示
+    revealFailed: "无法打开文件夹：%{detail}"
 iconTheme:
   dynamic: 动态切换
   minimal: 简约单色
@@ -41,6 +78,18 @@ notice:
   reopenToRetry: 请重新选择该会话以加载历史记录。
   newSessionFailed: 无法创建会话
   promptFailed: 消息未发送
+  runFailed: 智能体出错停止了
+  signInAgain: 需要重新登录才能继续
+  editFailed: 无法编辑这条消息
+  forkFailed: 无法 Fork 会话
+edit:
+  edit: 编辑并重新提问
+  fork: Fork 为新会话
+  busy: 智能体运行中，暂不可用
+  banner: 正在编辑之前的消息
+  bannerImages: "正在编辑之前的消息，原有的 %{count} 张图片不会再次发送"
+  cancel: 取消
+  notFound: 会话记录里找不到这条消息
 shell:
   newSession: 新会话
   workspaces: 工作区
@@ -286,3 +335,136 @@ toolDetail:
     completed: 已完成
     failed: 失败
     cancelled: 已取消
+trajectory:
+  spacing: 时间间距
+  runTokens: "%{tokens} tok"
+  requestShort: "#%{n} · %{model}"
+  view: 视图
+  conversation: 对话
+  trajectory: 轨迹
+  toggle: 在对话和轨迹之间切换
+  columns:
+    type: 类型
+    content: 内容
+    input: 输入
+    output: 输出
+    thinking: 思考
+    duration: 耗时
+  types:
+    user: 用户
+    command: 命令
+    request: 请求
+    system: 系统
+    assistant: 助手
+    tool: 工具
+    compaction: 压缩
+    branch_summary: 分支摘要
+    setting: 设置
+    extension: 扩展
+  run: "第 %{n} 轮"
+  betweenRuns: 运行之间
+  request: "请求 #%{n} · %{model}"
+  firstToken: "首 token %{duration}"
+  changed: 有变化
+  initialPrompt: 初始系统提示词
+  promptChanged: 系统提示词有变化
+  toolsAdded: "+%{n} 个工具"
+  toolsRemoved: "−%{n} 个工具"
+  toolsOnly: （仅工具调用）
+  toolCalls: "%{count} 个工具调用"
+  failedCount: "%{count} 个失败"
+  steering: 插话
+  follow_up: 排队
+  skill: skill
+  images: "%{count} 张图片"
+  files: "%{count} 个文件"
+  cancelled: 已取消
+  failed: 失败
+  setting:
+    model: "模型 → %{detail}"
+    thinking_level: "思考等级 → %{detail}"
+    active_tools: "工具 → %{detail}"
+  compactedFrom: "压缩前 %{tokens} tok"
+  summary: "%{runs} 轮 · %{requests} 次请求 · %{tokens} tok"
+  cacheHit: "缓存命中 %{rate}%"
+  evenSpacing: 等宽
+  realTime: 实际时长
+  foldRuns: 折叠轮次
+  groupCalls: 合并工具调用
+  showTimeline: 时间总览
+  loadAll: 加载全部
+  loadEarlier: 加载更早的记录
+  earlierNotLoaded: 更早的记录未加载
+  range: "时间范围 %{from}–%{to}"
+  clearRange: 清除时间范围
+  overview: 时间总览
+  empty: 还没有记录。发送消息后，这里会显示 agent 的每一步。
+  unavailable: 主机没有保存会话历史，无法显示轨迹。
+  failedToLoad: 无法加载轨迹
+  refreshFailed: 无法加载新的记录
+  retry: 重试
+  inProgress: "进行中 · %{duration}"
+  jumpToLatest: 回到最新
+  records: 轨迹记录
+  legend:
+    request: 请求（浅色段：等待首个 token）
+    tool: 工具调用
+    event: 事件
+    failed: 失败
+  hover:
+    started: "开始于 %{at}"
+    took: "耗时 %{duration}"
+    firstToken: "首 token 延迟 %{duration}"
+    generation: "生成 %{duration}"
+    throughput: "%{rate} tok/s"
+    merged: "%{count} 条记录"
+record:
+  tab: 记录
+  none: 在轨迹中选择一条记录
+  previous: 上一条记录
+  next: 下一条记录
+  status:
+    done: 完成
+    failed: 失败
+    cancelled: 已取消
+    running: 进行中
+    noResult: 无结果
+  tabs:
+    overview: 概述
+    timing: 计时
+    usage: 用量
+    prompt: 系统提示词
+    tools: 工具
+    options: 选项
+    arguments: 参数
+    result: 结果
+    raw: 原始内容
+  sections: 记录分页
+  thinking: 思考
+  calls: 工具调用
+  noText: 没有正文
+  sent: 发出
+  firstToken: 首 token
+  lastToken: 末 token
+  waited: 首 token 延迟
+  generated: 生成时长
+  throughput: 吞吐量
+  attempt: "请求 #%{n} 的一次尝试"
+  tokenFlow: "输入 %{input} → 输出 %{output} tok"
+  thisRequest: 本次请求
+  sessionTotal: 会话累计
+  input: 输入
+  cached: 缓存读取
+  output: 输出
+  reasoning: 推理
+  full: 完整
+  diff: 差异
+  promptView: 系统提示词视图
+  loading: 正在加载…
+  missing: 主机上已经没有这份内容。
+  added: 新增
+  removed: 移除
+  noResult: 还没有结果
+  started: 开始
+  ended: 结束
+  duration: 耗时

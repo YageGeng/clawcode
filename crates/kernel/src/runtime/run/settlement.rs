@@ -19,10 +19,17 @@ impl RunSettlement<'_> {
             AgentOutcome::Cancelled => {
                 serde_json::json!({ "status": "cancelled" })
             }
-            AgentOutcome::Failed { message } => serde_json::json!({
-                "status": "failed",
-                "error": message,
-            }),
+            AgentOutcome::Failed { message, sign_in } => match sign_in {
+                Some(method_id) => serde_json::json!({
+                    "status": "failed",
+                    "error": message,
+                    "signIn": method_id,
+                }),
+                None => serde_json::json!({
+                    "status": "failed",
+                    "error": message,
+                }),
+            },
         }
     }
 }

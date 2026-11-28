@@ -10,10 +10,10 @@ import { promptBlocks } from "../client/acp/prompt";
 import type { PromptDraft, PromptImage } from "../client/acp/prompt";
 import { WorkspaceFiles } from "../client/acp/workspaceFiles";
 import { AcpProtocol } from "../client/acp/protocol";
-import type { NewSessionResult, SessionId, SessionListResult, SessionUpdateNotification } from "../client/acp/protocol";
+import type { MessageId, NewSessionResult, SessionId, SessionListResult, SessionUpdateNotification } from "../client/acp/protocol";
 import { decodeSessionConfig } from "../client/acp/sessionConfig";
 import type { SessionConfigSelect } from "../client/acp/sessionConfig";
-import type { PermissionPrompt, SessionNotice, SessionRuntimeSnapshot, SessionSummary } from "../client/domain/model";
+import type { AuthMethod, PermissionPrompt, ProviderSignIn, SessionNotice, SessionRuntimeSnapshot, SessionSummary, SignInFlow } from "../client/domain/model";
 import { messageOf } from "../client/errors";
 import type { AcpTransport } from "../client/transport";
 import type { SessionWorkspaceState } from "../client/workspace/sessionState";
@@ -61,7 +61,7 @@ export type HostPhase =
 export type ChangeSelection = Readonly<{ turnKey: string; path: string; editId: string }>;
 
 /** The visible workspace tab and recorded edit belong to the host and session that opened them. */
-export type SessionPanel = Readonly<{ tab: "files" | "changes"; change?: ChangeSelection }>;
+export type SessionPanel = Readonly<{ tab: "files" | "changes" | "record"; change?: ChangeSelection }>;
 
 /** One host's connection and the Sessions it serves; its methods are the only writers. */
 export type HostStore = Readonly<{
@@ -77,6 +77,16 @@ export type HostStore = Readonly<{
   commandsFor: (sessionId: SessionId) => readonly AvailableCommand[];
   /** The settings that this host last confirmed for one Session. */
   sessionConfig: (sessionId: SessionId) => readonly SessionConfigSelect[];
+  /** The sign-in methods the host advertised at `initialize`; only the local host offers any. */
+  authMethods: Accessor<readonly AuthMethod[]>;
+  /** Asks the host which sign-in methods have a usable credential. */
+  signInStatuses: () => Promise<readonly ProviderSignIn[]>;
+  /** The sign-in in progress on this host, with its device code once shown; one at a time. */
+  signInFlow: Accessor<SignInFlow | null>;
+  /** Runs one provider sign-in to its end; rejects when it fails or is cancelled. */
+  signIn: (methodId: string) => Promise<void>;
+  /** Gives up the sign-in in progress: declines its device code and cancels the login. */
+  cancelSignIn: () => void;
   /** The settings a new Session on this host starts with, for a draft that has no Session yet. */
   defaultConfig: Accessor<readonly SessionConfigSelect[]>;
   /** Whether a settings write is awaiting a response for this Session. */
@@ -116,6 +126,18 @@ export type HostStore = Readonly<{
   newSession: (cwd: string) => Promise<SessionId>;
   /** Sends text and selected images; a failed turn returns the complete draft and adds a notice. */
   prompt: (sessionId: SessionId, text: string, images?: readonly PromptImage[]) => Promise<void>;
+  /**
+   * Asks again from before user message `messageId`: moves the Session's branch to that message's parent, replays it,
+   * then starts the edited draft as a prompt and resolves. Rejects, with a notice, when the branch could not move; the
+   * draft is then still the caller's.
+   */
+  editPrompt: (sessionId: SessionId, messageId: MessageId, draft: PromptDraft) => Promise<void>;
+  /** Reads one page of a Session's trajectory; rejects with the host's error (`historyUnavailable` when it keeps no history). */
+  trajectory: (sessionId: SessionId, query: Readonly<{ before?: number; after?: number }>) => Promise<unknown>;
+  /** A request's system prompt or tool list by hash; `undefined` when the host no longer has it. */
+  requestContent: (sessionId: SessionId, hash: string) => Promise<string | undefined>;
+  /** Forks the Session up to assistant message `messageId` into a new listed Session; its id. Rejects, with a notice, on failure. */
+  fork: (sessionId: SessionId, messageId: MessageId) => Promise<SessionId>;
   /** Each Session on this host remembers its own open inspector. */
   panels: Accessor<ReadonlyMap<SessionId, SessionPanel>>;
   files: WorkspaceFiles;
@@ -189,7 +211,11 @@ export function createHostStore(
   const sessionCommands = computed(() => workspace().sessionCommands);
   const sessionConfigs = computed(() => workspace().sessionConfigs);
   const permissions = computed(() => workspace().permissions);
-  const notices = computed(() => workspace().notices);
+  // Sessions whose `session/prompt` awaits its response. A Run that fails before insertion is also reported by that
+  // response (with the draft handed back), so its own notice waits for the response: dropped on a refusal, shown once
+  // the prompt was accepted.
+  const promptsInFlight = signal<ReadonlyMap<SessionId, number>>(new Map());
+  const notices = computed(() => workspace().notices.filter((notice) => !(notice.fromRun && promptsInFlight().has(notice.sessionId))));
   const runningIds = computed<ReadonlySet<SessionId>>(
     () => new Set([...sessionWorkspaces()].flatMap(([sessionId, session]) => (session.running ? [sessionId] : []))),
     { equals: (left, right) => left.size === right.size && [...left].every((sessionId) => right.has(sessionId)) },
@@ -241,6 +267,7 @@ export function createHostStore(
 
   /** Re-lists the Sessions. */
   const defaultConfig = signal<readonly SessionConfigSelect[]>(EMPTY_CONFIG);
+  const authMethods = signal<readonly AuthMethod[]>([]);
   /** Reads what a new Session starts with; a host without the method keeps the generic draft label. */
   const readDefaultConfig = async () => {
     try {
@@ -298,6 +325,61 @@ export function createHostStore(
   };
   connection.handle(AcpProtocol.methods.sessionRequestPermission, requestPermission);
 
+  const signInFlow = signal<SignInFlow | null>(null);
+  let signInAbort: AbortController | undefined;
+  // Every unanswered device code; the newest one is on screen. A host may issue a fresh code before withdrawing the old.
+  const pendingCodes = new Set<() => void>();
+  let shownCode: (() => void) | undefined;
+  /** Declines every device code still waiting for the user. */
+  const declineCodes = () => {
+    for (const decline of [...pendingCodes]) decline();
+  };
+  // The `auth/login` request in flight: only an elicitation scoped to it is that sign-in's device code.
+  let loginRequestId: number | undefined;
+  /**
+   * Shows the device code a sign-in asks for (`elicitation/create` in URL mode, scoped to the `auth/login` request)
+   * until the user gives up or the host withdraws it once the sign-in ends. Other elicitations, such as an MCP
+   * tool's URL authorization in a Session, have no surface here and are cancelled.
+   */
+  const elicit = (params: unknown, abort: AbortSignal): Promise<unknown> => {
+    const request = AcpProtocol.record(params);
+    const flow = signInFlow();
+    if (request?.mode !== "url" || typeof request.url !== "string" || flow === null
+      // Exactly the login's request scope: a Session or tool scope belongs to someone else, whatever its request id.
+      || loginRequestId === undefined || request.requestId !== loginRequestId
+      || request.sessionId !== undefined || request.toolCallId !== undefined) return Promise.resolve({ action: "cancel" });
+    const url = request.url;
+    const userCode = AcpProtocol.productMeta(request._meta, NAMESPACE)?.userCode;
+    return new Promise((resolve) => {
+      let answered = false;
+      /** Answers once and, if this code is the one on screen, takes it off; the sign-in itself may still be finishing. */
+      const finish = (action: "decline" | "cancel") => {
+        if (answered) return;
+        answered = true;
+        pendingCodes.delete(decline);
+        if (shownCode === decline) {
+          shownCode = undefined;
+          if (signInFlow()?.code !== undefined) signInFlow.set({ methodId: flow.methodId });
+        }
+        resolve({ action });
+      };
+      /** The user gave up on this code. */
+      const decline = () => finish("decline");
+      pendingCodes.add(decline);
+      shownCode = decline;
+      abort.addEventListener("abort", () => finish("cancel"), { once: true });
+      signInFlow.set({ methodId: flow.methodId, code: {
+        url, ...(typeof userCode === "string" ? { userCode } : {}), message: typeof request.message === "string" ? request.message : "",
+      } });
+    });
+  };
+  connection.handle("elicitation/create", elicit);
+  /** The notice for a request the host refused until the user signs in to `methodId`. */
+  const signInNotice = (sessionId: SessionId, methodId: string): SessionNotice => ({
+    id: `sign-in-${crypto.randomUUID()}`, sessionId, signIn: methodId,
+    title: t("auth.required", { name: authMethods().find((method) => method.id === methodId)?.name ?? methodId }),
+  });
+
   /** Connects, initializes and lists the Sessions, once. */
   const connectOnce = async (previous?: HostStore) => {
     if (previous?.info.id === info.id && previous.info.kind === info.kind
@@ -321,16 +403,18 @@ export function createHostStore(
       return;
     }
     try {
-      await connection.request(
+      const initialized = await connection.request<unknown>(
         AcpProtocol.methods.initialize,
         {
           protocolVersion: 2,
           info: { name: "clawcode-desktop", version: "0.1.0" },
-          capabilities: {},
+          // Sign-ins show their device code through a URL elicitation.
+          capabilities: { elicitation: { url: {} } },
           _meta: { [NAMESPACE]: { sessionUpdateBatch: { version: 1 }, toolCallHistory: true } },
         },
         { timeoutMs },
       );
+      authMethods.set(AcpProtocol.authMethods(initialized));
       await refreshSessions();
       void readDefaultConfig();
       // A close can follow the directory response on the wire before this continuation runs.
@@ -503,6 +587,43 @@ export function createHostStore(
     }
   };
 
+  /** Sends text and images; a failure hands the whole draft back and adds a notice. */
+  const prompt = async (sessionId: SessionId, text: string, images: readonly PromptImage[] = []) => {
+    promptsInFlight.update((map) => new Map(map).set(sessionId, (map.get(sessionId) ?? 0) + 1));
+    try {
+      await connection.request(AcpProtocol.methods.sessionPrompt, {
+        sessionId,
+        prompt: promptBlocks({ text, images }),
+        _meta: { [NAMESPACE]: { submissionId: crypto.randomUUID() } },
+      });
+    } catch (error: unknown) {
+      // Nothing reached history, or its outcome is unknown: hand the text back so it is not lost.
+      returnedDrafts.update((map) => new Map(map).set(sessionId, { text, images }));
+      // This refusal speaks for the Run that failed before insertion: drop that Run's own notice.
+      for (const notice of workspace().notices) {
+        if (notice.fromRun && notice.sessionId === sessionId) dispatch({ type: "notice/dismissed", id: notice.id });
+      }
+      const method = error instanceof AcpRequestError ? error.authMethod : undefined;
+      dispatch({
+        type: "notice/added",
+        notice: method !== undefined ? signInNotice(sessionId, method)
+          : { id: `prompt-${crypto.randomUUID()}`, sessionId, title: t("notice.promptFailed"), description: messageOf(error) },
+      });
+      setRunning(sessionId, false);
+    } finally {
+      promptsInFlight.update((map) => {
+        const next = new Map(map);
+        const left = (next.get(sessionId) ?? 1) - 1;
+        if (left > 0) next.set(sessionId, left);
+        else next.delete(sessionId);
+        return next;
+      });
+    }
+  };
+
+  /** Reads the Session's whole entry tree, which maps a transcript message to the entry Branch and Fork take. */
+  const readTree = (sessionId: SessionId) => connection.request<unknown>(`_${NAMESPACE}/session/tree`, { sessionId }, { timeoutMs });
+
   return {
     info,
     phase,
@@ -518,6 +639,33 @@ export function createHostStore(
     sessions,
     session: (sessionId) => sessionWorkspaces().get(sessionId),
     defaultConfig,
+    authMethods,
+    signInFlow,
+    signIn: async (methodId) => {
+      if (signInFlow() !== null) throw new Error("A sign-in is already in progress");
+      const controller = new AbortController();
+      signInAbort = controller;
+      signInFlow.set({ methodId });
+      try {
+        // A sign-in waits for the user in a browser: no deadline, only cancellation.
+        await connection.request(AcpProtocol.methods.authLogin, { methodId },
+          // The response ends ownership in wire order, before this continuation runs.
+          { signal: controller.signal, onRequestId: (id) => { loginRequestId = id; }, onResult: () => { loginRequestId = undefined; } });
+      } finally {
+        loginRequestId = undefined;
+        declineCodes();
+        signInAbort = undefined;
+        signInFlow.set(null);
+      }
+    },
+    cancelSignIn: () => {
+      // Cancelling revokes the login's scope at once: a late elicitation from it is someone else's.
+      loginRequestId = undefined;
+      declineCodes();
+      signInAbort?.abort();
+    },
+    signInStatuses: async () => AcpProtocol.signInStatuses(
+      await connection.request<unknown>(`_${NAMESPACE}/auth/status`, {}, { timeoutMs })),
     renameSession: async (sessionId, title) => {
       const reply = AcpProtocol.record(await connection.request<unknown>(
         AcpProtocol.methods.sessionSetTitle, { sessionId, title: title.trim() }, { timeoutMs }));
@@ -555,6 +703,9 @@ export function createHostStore(
         // Remote error text can contain peer-supplied data; its RPC code identifies the failing request safely.
         const detail = error instanceof AcpRequestError ? ` (ACP ${error.rpc.code})` : "";
         console.warn(`Could not change settings for Session ${sessionId} on host ${info.id.slice(0, 12)}${detail}`);
+        // A model that needs a sign-in refuses the change: offer the sign-in, then the user picks it again.
+        const method = error instanceof AcpRequestError ? error.authMethod : undefined;
+        if (method !== undefined) dispatch({ type: "notice/added", notice: signInNotice(sessionId, method) });
         throw error;
       } finally {
         configWrites.update((pending) => {
@@ -607,21 +758,41 @@ export function createHostStore(
       }
       return result.sessionId;
     },
-    prompt: async (sessionId, text, images = []) => {
+    prompt,
+    trajectory: (sessionId, query) => connection.request<unknown>(`_${NAMESPACE}/session/trajectory`, { sessionId, ...query }, { timeoutMs }),
+    requestContent: async (sessionId, hash) => {
+      const reply = AcpProtocol.record(await connection.request<unknown>(`_${NAMESPACE}/session/trajectory/content`, { sessionId, hash }, { timeoutMs }));
+      return typeof reply?.content === "string" ? reply.content : undefined;
+    },
+    editPrompt: async (sessionId, messageId, draft) => {
       try {
-        await connection.request(AcpProtocol.methods.sessionPrompt, {
-          sessionId,
-          prompt: promptBlocks({ text, images }),
-          _meta: { [NAMESPACE]: { submissionId: crypto.randomUUID() } },
-        });
+        const entry = AcpProtocol.treeEntry(await readTree(sessionId), messageId, "user");
+        if (entry === undefined) throw new Error(t("edit.notFound"));
+        // Branch only moves the cursor; the edited message then goes out as an ordinary prompt on the new branch.
+        await connection.request<unknown>(`_${NAMESPACE}/session/branch`, { sessionId, entryId: entry.parentId, summarize: false }, { timeoutMs });
+        // Replay before sending: a replay that started after the prompt would clear its live updates.
+        attached.delete(sessionId);
+        await openSession(sessionId);
       } catch (error: unknown) {
-        // Nothing reached history, or its outcome is unknown: hand the text back so it is not lost.
-        returnedDrafts.update((map) => new Map(map).set(sessionId, { text, images }));
-        dispatch({
-          type: "notice/added",
-          notice: { id: `prompt-${crypto.randomUUID()}`, sessionId, title: t("notice.promptFailed"), description: messageOf(error) },
-        });
-        setRunning(sessionId, false);
+        dispatch({ type: "notice/added", notice: { id: `edit-${crypto.randomUUID()}`, sessionId, title: t("notice.editFailed"), description: messageOf(error) } });
+        throw error;
+      }
+      // The turn runs on after this resolves; like any prompt, a failed send comes back as a returned draft.
+      void prompt(sessionId, draft.text, draft.images);
+    },
+    fork: async (sessionId, messageId) => {
+      try {
+        const entry = AcpProtocol.treeEntry(await readTree(sessionId), messageId, "assistant");
+        if (entry === undefined) throw new Error(t("edit.notFound"));
+        const cwd = sessions().find((session) => session.sessionId === sessionId)?.cwd;
+        // Copying a long history may outlast the read deadline, as creating a Session may.
+        const reply = AcpProtocol.record(await connection.request<unknown>(`_${NAMESPACE}/session/fork`, { sessionId, entryId: entry.entryId, cwd }));
+        if (typeof reply?.sessionId !== "string") throw new Error("session/fork did not return a Session id");
+        await refreshSessions();
+        return reply.sessionId as SessionId;
+      } catch (error: unknown) {
+        dispatch({ type: "notice/added", notice: { id: `fork-${crypto.randomUUID()}`, sessionId, title: t("notice.forkFailed"), description: messageOf(error) } });
+        throw error;
       }
     },
     returnedDrafts,

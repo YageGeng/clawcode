@@ -34,6 +34,18 @@ export class AcpRequestError extends Error {
     this.name = "AcpRequestError";
     this.rpc = rpc;
   }
+
+  /** The sign-in method a host names when it refuses a request until the user signs in (`-32000` with `methodId`). */
+  get authMethod(): string | undefined {
+    const data = this.rpc.data as Readonly<{ methodId?: unknown }> | null | undefined;
+    return this.rpc.code === -32000 && typeof data?.methodId === "string" ? data.methodId : undefined;
+  }
+
+  /** The product reason a host attaches to its error (`historyUnavailable`, `questionClosed`), if any. */
+  get reason(): string | undefined {
+    const data = this.rpc.data as Readonly<{ reason?: unknown }> | null | undefined;
+    return typeof data?.reason === "string" ? data.reason : undefined;
+  }
 }
 
 export class AcpConnection {
@@ -106,8 +118,12 @@ export class AcpConnection {
     params: unknown,
     options: Readonly<{
       timeoutMs?: number;
+      /** Receives the request ID before sending, so even synchronous inbound requests can be correlated. */
+      onRequestId?: (id: number) => void;
       /** Applies a response snapshot in wire order, before the next notification in the same event-loop turn. */
       onResult?: (result: T) => void;
+      /** Aborting it sends `$/cancel_request` for this request and rejects the Promise. */
+      signal?: AbortSignal;
     }> = {}
   ): Promise<T> {
     return new Promise<T>((resolve, reject) => {
@@ -117,13 +133,34 @@ export class AcpConnection {
         reject(reason instanceof Error ? reason : new Error(String(reason)));
         return;
       }
+      if (options.signal?.aborted) {
+        reject(new Error(`ACP request ${method} was cancelled`));
+        return;
+      }
       const id = this.nextRequestId();
+      // The peer stops its work on `$/cancel_request`; the caller stops waiting at once.
+      const onAbort = () => {
+        const pending = this.pending.get(id);
+        if (pending === undefined) return;
+        if (pending.timeout !== undefined) clearTimeout(pending.timeout);
+        this.pending.delete(id);
+        try {
+          this.notify("$/cancel_request", { requestId: id });
+        } catch (reason: unknown) {
+          this.callbacks.diagnostic(`Could not cancel ${method}: ${messageOf(reason)}`);
+        }
+        reject(new Error(`ACP request ${method} was cancelled`));
+      };
+      /** Stops listening for an abort once the request has settled. */
+      const detach = () => options.signal?.removeEventListener("abort", onAbort);
       const timeout = options.timeoutMs === undefined ? undefined : setTimeout(() => {
         if (!this.pending.delete(id)) return;
+        detach();
         reject(new Error(`ACP request ${method} timed out`));
       }, options.timeoutMs);
       this.pending.set(id, {
         resolve: (value) => {
+          detach();
           try {
             options.onResult?.(value as T);
             resolve(value as T);
@@ -131,15 +168,23 @@ export class AcpConnection {
             reject(reason);
           }
         },
-        reject,
+        reject: (reason) => {
+          detach();
+          reject(reason);
+        },
         ...(timeout === undefined ? {} : { timeout })
       });
+      // Listen before sending: a transport that answers inside `send` settles (and detaches) before it returns.
+      options.signal?.addEventListener("abort", onAbort, { once: true });
       try {
+        // A transport may deliver related inbound requests before send returns.
+        options.onRequestId?.(id);
         this.transport.send(JSON.stringify({ jsonrpc: "2.0", id, method, params }));
       } catch (reason: unknown) {
         const pending = this.pending.get(id);
         if (pending?.timeout !== undefined) clearTimeout(pending.timeout);
         this.pending.delete(id);
+        detach();
         reject(reason instanceof Error ? reason : new Error(String(reason)));
       }
     });

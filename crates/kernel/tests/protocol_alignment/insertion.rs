@@ -689,12 +689,13 @@ async fn auth_required_during_a_run_shows_an_assistant_error() {
         metadata.error
     );
     assert_eq!(test.model.requests.lock().expect("requests").len(), 1);
+    // The settled Run names the sign-in, so clients can offer it.
     assert!(test.sinks.saw(&session, |event| matches!(
         event,
         AgentEventPayload::AgentSettled {
-            outcome: AgentOutcome::Failed { .. },
+            outcome: AgentOutcome::Failed { sign_in: Some(method_id), .. },
             ..
-        }
+        } if method_id == "chatgpt"
     )));
 }
 

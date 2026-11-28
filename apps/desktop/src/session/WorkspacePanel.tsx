@@ -14,8 +14,16 @@ import { Tooltip } from "../ui/menu";
 import { Badge, LineCounts } from "../ui/surface";
 import { Tabs } from "../ui/tabs";
 import { type } from "../ui/tokens";
+import type { SessionId } from "../client/acp/protocol";
+import type { TrajectoryLog } from "../client/trajectory";
+import { RecordDetails } from "../trajectory/RecordDetails";
 import { ChangePanel } from "./ChangePanel";
 import { FilesPanel } from "./FilesPanel";
+
+/** What the Record tab needs from the Session's trajectory; one object per trajectory, so the tab keeps its state. */
+export type TrajectoryPanel = Readonly<{
+  sessionId: SessionId; log: TrajectoryLog; selected: () => string | undefined; onSelect: (recordId: string) => void;
+}>;
 
 /** Mounts the tab on first visit and keeps its native scroll position and selection across tab switches. */
 function InspectorTab(props: { active: boolean; children: JSX.Element }) {
@@ -74,6 +82,8 @@ export function WorkspacePanel(props: {
   /** Host connection state forwarded here in compact mode, while the session header is hidden. */
   status?: JSX.Element;
   file?: FileChange; turnNumber: number; turns: readonly TurnView[];
+  /** The trajectory shown in the Session, whose selected record the Record tab details; absent in the conversation. */
+  trajectory?: TrajectoryPanel;
   onChange: (panel: SessionPanel) => void; onClose: () => void;
 }) {
   // A JSX slot is a getter that builds a new element on every read, `If`'s accessor included; read it once.
@@ -91,7 +101,10 @@ export function WorkspacePanel(props: {
   const tabs = computed(() => [
     { value: "files", label: t("files.title") },
     { value: "changes", label: t("changes.title"), badge: changedFileCount() },
+    ...(props.trajectory ? [{ value: "record", label: t("record.tab") }] : []),
   ]);
+  // Without a trajectory on screen the Record tab is gone; show the files in its place.
+  const tab = computed(() => (props.panel.tab === "record" && !props.trajectory ? "files" : props.panel.tab));
   const root = computed(() => props.host.phase().kind === "ready" ? props.cwd : undefined);
   // Remount the browser when a reconnect replaces the reader, even if the workspace path is identical.
   const scopes = computed(() => {
@@ -106,10 +119,10 @@ export function WorkspacePanel(props: {
             buttonRef={(node) => { focusBack = setTimeout(() => { if (props.compact && !props.modalOpen) node.focus(); }, 0); }}
             tooltip={<Tooltip text={t("files.close")} />} onPress={props.onClose} />
         </If>
-        <Tabs variant="bar" items={tabs()} value={props.panel.tab} accessibilityLabel={t("files.panel")}
-          onChange={(value) => props.onChange({ ...props.panel, tab: value === "files" ? "files" : "changes" })} />
+        <Tabs variant="bar" items={tabs()} value={tab()} accessibilityLabel={t("files.panel")}
+          onChange={(value) => props.onChange({ ...props.panel, tab: value === "record" ? "record" : value === "files" ? "files" : "changes" })} />
         <View class="min-w-0 flex-1 items-start pl-1">
-          <If when={props.panel.tab === "changes" && props.file}>
+          <If when={tab() === "changes" && props.file}>
             <Badge label={t("changes.turn", { number: props.turnNumber })} />
           </If>
         </View>
@@ -118,13 +131,13 @@ export function WorkspacePanel(props: {
           <IconButton icon="x" label={t("files.close")} tooltip={<Tooltip text={t("files.close")} />} onPress={props.onClose} />
         </If>
       </View>
-      <InspectorTab active={props.panel.tab === "files"}>
+      <InspectorTab active={tab() === "files"}>
         <Each of={scopes()}>
           {(workspace) => <FilesPanel reader={workspace().reader} root={workspace().root} />}
         </Each>
         <If when={!scopes().length}><Empty class="flex-1" icon="folder" title={t("files.unavailable")} /></If>
       </InspectorTab>
-      <InspectorTab active={props.panel.tab === "changes"}>
+      <InspectorTab active={tab() === "changes"}>
         <If when={props.file} else={
           <ChangedFilesList turns={props.turns} onSelect={(change) => props.onChange({ tab: "changes", change })} />
         }>
@@ -136,6 +149,10 @@ export function WorkspacePanel(props: {
             }} />}
         </If>
       </InspectorTab>
+      <If when={tab() === "record" ? props.trajectory : undefined}>
+        {(trajectory) => <RecordDetails host={props.host} sessionId={trajectory().sessionId} log={trajectory().log}
+          recordId={trajectory().selected()} onSelect={trajectory().onSelect} />}
+      </If>
     </View>
   );
 }

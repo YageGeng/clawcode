@@ -472,6 +472,7 @@ impl<'a> AcpEventMapper<'a> {
                             message: message.clone().unwrap_or_else(|| {
                                 "Slash Command failed".to_string()
                             }),
+                            sign_in: None,
                         }
                     }
                 };
@@ -1222,7 +1223,18 @@ impl From<StopReasonOf<'_>> for wire::StopReason {
         match outcome.0 {
             AgentOutcome::Succeeded => Self::EndTurn,
             AgentOutcome::Cancelled => Self::Cancelled,
-            AgentOutcome::Failed { message } => Self::Error(
+            // A rejected credential carries the same code and `methodId` as a
+            // prompt refused before insertion, so clients offer one sign-in.
+            AgentOutcome::Failed {
+                message,
+                sign_in: Some(method_id),
+            } => Self::Error(
+                wire::ErrorStopReason::new().error(
+                    wire::Error::new(-32000, message.clone())
+                        .data(serde_json::json!({ "methodId": method_id })),
+                ),
+            ),
+            AgentOutcome::Failed { message, .. } => Self::Error(
                 wire::ErrorStopReason::new()
                     .error(wire::Error::new(-32603, message.clone())),
             ),

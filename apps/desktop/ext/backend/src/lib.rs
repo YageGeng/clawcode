@@ -1,6 +1,7 @@
 //! The desktop app's Rust side: what `App.tsx` imports from `clawcode-backend`.
 //! Their TypeScript declarations are generated from these types into `.nsh/types`.
 
+mod about;
 mod apps;
 mod connection;
 mod diff;
@@ -30,6 +31,7 @@ fn native(registry: &mut Registry) {
         .class::<RemoteHosting>()
         .class::<RemoteConnection>()
         .class::<RemotePairing>()
+        .module::<about::AppDetails>()
         .module::<diff::SnapshotDiff>()
         .module::<editors::ExternalEditors>()
         .module::<Folders>()

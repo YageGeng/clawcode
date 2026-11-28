@@ -16,7 +16,7 @@ import { Markdown } from "../ui/markdown";
 import { Field, Input, Textarea } from "../ui/input";
 import { ListItem, TreeList } from "../ui/list";
 import { Menu, MenuItem, MenuSeparator, Popover, Submenu, Tooltip } from "../ui/menu";
-import { Checkbox, Select, Switch } from "../ui/selection";
+import { Checkbox, Segmented, Select, Switch } from "../ui/selection";
 import { Badge, LineCounts, Separator, StatusDot, Surface } from "../ui/surface";
 import { Tabs } from "../ui/tabs";
 import { Toasts, ToastStore } from "../ui/toast";
@@ -115,6 +115,15 @@ function Gallery() {
           <Checkbox label="Auto-approve reads" checked={checked()} onChange={(value) => checked.set(value)} />
           <Checkbox label="Disabled" checked={false} disabled onChange={() => {}} />
           <Switch label="Thinking" checked={on()} onChange={(value) => on.set(value)} />
+          <Segmented
+            accessibilityLabel="View mode"
+            items={[
+              { value: "fast", label: "Conversation", icon: "message-square" },
+              { value: "deep", label: "Trajectory", icon: "chart-gantt" },
+            ]}
+            value={model() === "deep" ? "deep" : "fast"}
+            onChange={(value) => model.set(value)}
+          />
           <Select
             items={[
               { value: "fast", title: "Fast model" },

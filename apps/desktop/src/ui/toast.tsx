@@ -4,7 +4,7 @@ import type { Signal } from "nsh";
 import { Toast as BaseToast, ToastManager, ToastStack } from "nsh/base";
 import type { ToastEntry } from "nsh/base";
 
-import { IconButton } from "./button";
+import { Button, IconButton } from "./button";
 import { Icon } from "./icon";
 import type { IconName } from "./icon";
 import { motion, motionClass } from "./motion";
@@ -12,7 +12,13 @@ import type { Tone } from "./tokens";
 import { inlineLabel, toneToken, type } from "./tokens";
 
 /** What a toast says. */
-export type ToastMessage = Readonly<{ title: string; description?: string; tone?: Tone }>;
+export type ToastMessage = Readonly<{
+  title: string;
+  description?: string;
+  tone?: Tone;
+  /** One follow-up the toast offers; pressing it also dismisses the toast. */
+  action?: Readonly<{ label: string; onPress: () => void }>;
+}>;
 
 /** The icon of each tone, so a toast never carries meaning by color alone. */
 const toneIcon: Readonly<Record<Tone, IconName>> = {
@@ -27,6 +33,8 @@ const toneIcon: Readonly<Record<Tone, IconName>> = {
 export class ToastStore {
   private readonly manager = new ToastManager({ duration: motion.slow, exitDuration: motion.base });
   private readonly entries: Signal<readonly ToastEntry[]> = signal<readonly ToastEntry[]>([]);
+  // The manager copies each toast's value, which drops functions: action callbacks stay here, by toast id.
+  private readonly actions = new Map<string, () => void>();
   private sequence = 0;
 
   /** The toasts to draw, oldest first. */
@@ -34,22 +42,37 @@ export class ToastStore {
     return this.entries();
   }
 
-  /** Shows a toast for `timeoutMs` (4 s by default); returns its id. */
-  show(message: ToastMessage, timeoutMs = 4000): string {
+  /** Shows a toast for `timeoutMs` (4 s by default, or 8 s when offering an action); returns its id. */
+  show(message: ToastMessage, timeoutMs?: number): string {
     const id = `toast-${++this.sequence}`;
-    this.manager.push(id, message, { timeout: timeoutMs });
+    if (message.action !== undefined) this.actions.set(id, message.action.onPress);
+    const timeout = timeoutMs ?? (message.action === undefined ? 4000 : 8000);
+    this.manager.push(id, { ...message, action: message.action === undefined ? undefined : { label: message.action.label } },
+      { timeout });
     this.sync();
     return id;
   }
 
   /** Begins a toast's exit. */
   dismiss(id: string): void {
+    this.actions.delete(id);
     if (this.manager.dismiss(id)) this.sync();
+  }
+
+  /** Runs a toast's action, then dismisses it. */
+  act(id: string): void {
+    this.actions.get(id)?.();
+    this.dismiss(id);
   }
 
   /** Moves the toasts' lifecycle to now; the stack calls it on a timer while any is mounted. */
   advance(paused: boolean): void {
-    if (this.manager.advance(paused).changed) this.sync();
+    if (this.manager.advance(paused).changed) {
+      this.sync();
+      // Drop callbacks of toasts that finished exiting after their timeout.
+      const mounted = new Set(this.entries().map((entry) => entry.id));
+      for (const id of this.actions.keys()) if (!mounted.has(id)) this.actions.delete(id);
+    }
   }
 
   /** Copies the manager's mounted toasts into the signal the stack reads. */
@@ -80,7 +103,8 @@ export function Toasts(props: { store: ToastStore }) {
         }}
       >
         <Each of={props.store.visible()} key={(entry) => entry.id}>
-          {(entry) => <ToastCard entry={entry()} onDismiss={() => props.store.dismiss(entry().id)} />}
+          {(entry) => <ToastCard entry={entry()} onDismiss={() => props.store.dismiss(entry().id)}
+            onAction={() => props.store.act(entry().id)} />}
         </Each>
       </ToastStack>
     </Overlay>
@@ -88,7 +112,7 @@ export function Toasts(props: { store: ToastStore }) {
 }
 
 /** One toast: tone icon, title, description and a close button. */
-function ToastCard(props: { entry: ToastEntry; onDismiss: () => void }) {
+function ToastCard(props: { entry: ToastEntry; onDismiss: () => void; onAction: () => void }) {
   const message = () => props.entry.value as ToastMessage;
   const tone = () => message().tone ?? "neutral";
   return (
@@ -107,6 +131,12 @@ function ToastCard(props: { entry: ToastEntry; onDismiss: () => void }) {
       <View class="flex-1 gap-0.5">
         <Text class={`${inlineLabel} ${type.ui} font-medium text-popover-foreground`}>{message().title}</Text>
         <If when={message().description}>{(text) => <Text class={`${type.meta} text-muted-foreground`}>{text()}</Text>}</If>
+        <If when={message().action}>
+          {(action) => (
+            <Button class="mt-1.5 self-start" label={action().label} size="sm" variant="outline"
+              onPress={props.onAction} />
+          )}
+        </If>
       </View>
       <IconButton icon="x" label={t("common.dismiss")} size="sm" class="-my-0.5" onPress={props.onDismiss} />
     </BaseToast>

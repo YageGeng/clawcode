@@ -1,10 +1,11 @@
 import { signal, Text, View } from "nsh";
 import type { ViewRef } from "nsh";
-import { Checkbox as BaseCheckbox, Select as BaseSelect, Slider as BaseSlider, Switch as BaseSwitch } from "nsh/base";
+import { Button as BaseButton, Checkbox as BaseCheckbox, Select as BaseSelect, Slider as BaseSlider, Switch as BaseSwitch } from "nsh/base";
 import type { SelectItem } from "nsh/base";
 
 import type { ControlSize } from "./button";
 import { Icon } from "./icon";
+import type { IconName } from "./icon";
 import { popupSurface } from "./menu";
 import { motionClass } from "./motion";
 import { focusRing, inlineLabel, type } from "./tokens";
@@ -16,8 +17,8 @@ export function Checkbox(props: { label: string; checked: boolean; disabled?: bo
       checked={props.checked}
       disabled={props.disabled === true}
       onChange={(event) => props.onChange(event.checked)}
-      class={`flex-row items-center gap-2 rounded-(--radius) ${focusRing} disabled:opacity-50`}
-      indicatorClass={`size-4 items-center justify-center rounded-[5px] border border-input bg-background checked:border-primary checked:bg-primary ${motionClass.wash}`}
+      class={`group flex-row items-center gap-2 rounded-(--radius) py-0.5 ${focusRing} disabled:opacity-50`}
+      indicatorClass={`size-4 items-center justify-center rounded-[5px] border border-input bg-background group-hover:border-foreground/40 group-active:scale-[0.95] group-disabled:hover:border-input group-disabled:active:scale-100 checked:border-primary checked:bg-primary group-hover:checked:bg-primary/90 ${motionClass.wash}`}
       indicator={
         // Toggle checkmark visibility immediately without an opacity fade.
         <View class={props.checked ? "opacity-100" : "opacity-0"}>
@@ -38,9 +39,9 @@ export function Switch(props: { label: string; checked: boolean; disabled?: bool
       checked={props.checked}
       disabled={props.disabled === true}
       onChange={(event) => props.onChange(event.checked)}
-      class={`flex-row items-center gap-2 rounded-(--radius) ${focusRing} disabled:opacity-50`}
-      trackClass={`h-5 w-9 justify-center rounded-full bg-input px-0.5 checked:bg-primary ${motionClass.wash}`}
-      thumbClass={`size-4 rounded-full bg-background checked:translate-x-4 ${motionClass.move}`}
+      class={`group flex-row items-center gap-2.5 rounded-(--radius) py-0.5 ${focusRing} disabled:opacity-50`}
+      trackClass={`h-5 w-9 justify-center rounded-full bg-input px-0.5 group-hover:bg-foreground/25 group-active:scale-[0.97] group-disabled:hover:bg-input group-disabled:active:scale-100 checked:bg-primary group-hover:checked:bg-primary/90 ${motionClass.wash}`}
+      thumbClass={`size-4 rounded-full bg-background shadow-xs checked:translate-x-4 ${motionClass.move}`}
     >
       <Text class={`${inlineLabel} ${type.ui} text-foreground`}>{props.label}</Text>
     </BaseSwitch>
@@ -185,6 +186,40 @@ export function StepSlider(props: {
         <Text class={`shrink truncate ${type.meta} text-muted-foreground`}>{props.items[0]?.title}</Text>
         <Text class={`shrink truncate ${type.meta} text-muted-foreground`}>{props.items[props.items.length - 1]?.title}</Text>
       </View>
+    </View>
+  );
+}
+
+/** One segment of a `Segmented` control. */
+export type SegmentedItem = Readonly<{ value: string; label: string; icon?: IconName }>;
+
+/** A segmented control: a few exclusive choices side by side in one track, the chosen one raised. */
+export function Segmented(props: { items: readonly SegmentedItem[]; value: string; accessibilityLabel: string; class?: string; onChange: (value: string) => void }) {
+  return (
+    <View role="radiogroup" accessibilityLabel={props.accessibilityLabel}
+      class={`h-7 flex-row items-center gap-0.5 rounded-(--radius) bg-muted p-0.5 ${props.class ?? ""}`}>
+      <Each of={props.items} key={(item) => item.value}>
+        {(item) => {
+          const active = () => props.value === item().value;
+          return (
+            <BaseButton
+              role="radio"
+              accessibilityLabel={item().label}
+              accessibilityState={{ checked: active() }}
+              selected={active()}
+              onPress={() => props.onChange(item().value)}
+              // `bg-card` + hairline border reads as raised above `bg-muted` in both light and dark themes; the press scale and the
+              // washes share one transition (`motionClass.press`).
+              class={`h-6 flex-row items-center justify-center gap-1.5 rounded-[8px] border border-transparent px-2.5 hover:bg-accent selected:border-border/70 selected:bg-card selected:shadow-xs ${focusRing} ${motionClass.press}`}
+            >
+              <If when={item().icon}>
+                {(icon) => <Icon name={icon()} size="sm" color={active() ? "foreground" : "muted-foreground"} />}
+              </If>
+              <Text class={`${inlineLabel} ${type.meta} font-medium ${active() ? "text-foreground" : "text-muted-foreground"}`}>{item().label}</Text>
+            </BaseButton>
+          );
+        }}
+      </Each>
     </View>
   );
 }

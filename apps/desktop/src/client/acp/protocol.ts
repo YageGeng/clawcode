@@ -1,4 +1,4 @@
-import type { PermissionPrompt, SessionOwner, SessionSummary } from "../domain/model";
+import type { AuthMethod, PermissionPrompt, ProviderSignIn, SessionOwner, SessionSummary, SignInState } from "../domain/model";
 
 export type Brand<T, Name extends string> = T & { readonly __brand: Name };
 
@@ -77,6 +77,7 @@ export const AcpProtocol = {
     sessionSetConfigOption: "session/set_config_option",
     sessionSetTitle: "session/set_title",
     sessionDelete: "session/delete",
+    authLogin: "auth/login",
     sessionUpdate: "session/update"
   },
   /** `value` as a plain JSON object, or `undefined` for anything else (arrays and null included). */
@@ -188,6 +189,46 @@ export const AcpProtocol = {
       ...(typeof details.parentSessionId === "string" ? { parentSessionId: details.parentSessionId as SessionId } : {}),
       ...this.sessionOwner(details.ownership),
     };
+  },
+  /**
+   * The named sign-in methods of an `initialize` reply; malformed entries are left out. ACP v2 names a method
+   * `methodId` (`{ type: "agent", methodId, name }`); v1 called it `id`.
+   */
+  authMethods(reply: unknown): readonly AuthMethod[] {
+    const methods = this.record(reply)?.authMethods;
+    if (!Array.isArray(methods)) return [];
+    return methods.flatMap((value: unknown) => {
+      const { methodId, name, description } = this.record(value) ?? {};
+      const id = methodId ?? this.record(value)?.id;
+      return typeof id === "string" && typeof name === "string"
+        ? [{ id, name, ...(typeof description === "string" ? { description } : {}) }] : [];
+    });
+  },
+  /** A `_clawcode/auth/status` reply; an unknown state reads as undecided. Throws for a reply that is not a list. */
+  signInStatuses(reply: unknown): readonly ProviderSignIn[] {
+    if (!Array.isArray(reply)) throw new Error("Invalid sign-in status reply");
+    return reply.flatMap((value: unknown) => {
+      const { methodId, status } = this.record(value) ?? {};
+      if (typeof methodId !== "string") return [];
+      const state: SignInState = status === "signedIn" || status === "signInRequired" ? status : "unknown";
+      return [{ methodId, status: state }];
+    });
+  },
+  /**
+   * The entry of a `_clawcode/session/tree` reply that recorded message `messageId` as `role` ("user" or "assistant"),
+   * with its parent (`null` at the root); `undefined` when the tree holds no such message.
+   */
+  treeEntry(reply: unknown, messageId: MessageId, role: "user" | "assistant"): { entryId: string; parentId: string | null } | undefined {
+    const entries = this.record(reply)?.entries;
+    if (!Array.isArray(entries)) throw new Error("Invalid session tree reply");
+    for (const value of entries) {
+      const entry = this.record(value);
+      const payload = this.record(entry?.payload);
+      if (entry?.kind !== "message" || payload?.message_id !== messageId || this.record(payload.content)?.type !== role) continue;
+      if (typeof entry.entryId !== "string") return undefined;
+      return { entryId: entry.entryId, parentId: typeof entry.parentId === "string" ? entry.parentId : null };
+    }
+    return undefined;
   },
   /** The `owner` field of a summary; older hosts and incomplete edges contribute nothing. */
   sessionOwner(value: unknown): { owner?: SessionOwner } {

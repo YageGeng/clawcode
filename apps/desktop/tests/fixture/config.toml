@@ -19,3 +19,18 @@ id = "model"
 display_name = "Fixture Model"
 context_tokens = 32768
 max_output_tokens = 1024
+
+# A sign-in provider with an empty token store, so the real backend advertises a
+# sign-in method that reads as not signed in. Never contacted by the tests. The
+# token store must be an absolute path; nothing is written there unless a test
+# completes a sign-in, which none does.
+[[providers]]
+id = "chatgpt"
+display_name = "ChatGPT"
+auth = { type = "chatgpt", auth_dir = "/tmp/clawcode-desktop-fixture/chatgpt" }
+
+[[providers.models]]
+id = "fixture-gpt"
+display_name = "Fixture GPT"
+context_tokens = 32768
+max_output_tokens = 1024

@@ -44,6 +44,11 @@ import sun from "../../assets/icons/sun.svg";
 import trash2 from "../../assets/icons/trash-2.svg";
 import triangleAlert from "../../assets/icons/triangle-alert.svg";
 import x from "../../assets/icons/x.svg";
+import chartGantt from "../../assets/icons/chart-gantt.svg";
+import gitFork from "../../assets/icons/git-fork.svg";
+import puzzle from "../../assets/icons/puzzle.svg";
+import send from "../../assets/icons/send.svg";
+import wrench from "../../assets/icons/wrench.svg";
 
 /** The Lucide icons the app ships, by name. */
 const icons = {
@@ -91,6 +96,11 @@ const icons = {
   "trash-2": trash2,
   "triangle-alert": triangleAlert,
   x,
+  "chart-gantt": chartGantt,
+  "git-fork": gitFork,
+  puzzle,
+  send,
+  wrench,
 } as const;
 
 /** The name of an icon `Icon` draws. */

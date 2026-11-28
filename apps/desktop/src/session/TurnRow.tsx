@@ -9,7 +9,8 @@ import { Disclosure } from "../ui/disclosure";
 import { Markdown } from "../ui/markdown";
 import { motionClass } from "../ui/motion";
 import { TurnChanges, type ViewTurnChange } from "./ChangeCard";
-import { MessageActions } from "./MessageActions";
+import { MessageActions, PromptActions } from "./MessageActions";
+import type { MessageEditing } from "./MessageActions";
 import { AssistantContent } from "./ToolContent";
 import { ToolRow } from "./ToolRow";
 
@@ -26,6 +27,8 @@ export type TurnSource = Readonly<{
   terminal: (id: string) => TerminalEntity | undefined;
   isOpen: (key: string) => boolean;
   toggle: (key: string) => void;
+  /** Edit and Fork on the transcript's messages; absent for a subagent Session. */
+  editing?: MessageEditing;
 }>;
 
 /** A blinking caret on the working header; still under reduced motion. */
@@ -34,7 +37,7 @@ function Caret() {
 }
 
 /** Renders message content in either the reply or an opened commentary row. */
-function AssistantMessage(props: { message?: MessageEntity; running: boolean; showActions?: boolean }) {
+function AssistantMessage(props: { message?: MessageEntity; running: boolean; showActions?: boolean; editing?: MessageEditing }) {
   const media = computed(() => props.message?.attachments);
   // Text before a media block is complete. Only a new media layout or authoritative snapshot can change it.
   const completed = computed(() => {
@@ -57,7 +60,7 @@ function AssistantMessage(props: { message?: MessageEntity; running: boolean; sh
             {(text) => <Markdown text={text()} streaming={props.running} />}
           </If>
           <If when={props.showActions && !!message().text}>
-            <MessageActions text={message().text} timestampMs={message().endedAtMs} />
+            <MessageActions messageId={message().messageId} text={message().text} timestampMs={message().endedAtMs} editing={props.editing} />
           </If>
         </View>
       )}
@@ -66,10 +69,16 @@ function AssistantMessage(props: { message?: MessageEntity; running: boolean; sh
 }
 
 /** Shows a user prompt or each recorded question and choice at the position of its durable message. */
-function UserMessage(props: { message: MessageEntity; arriving?: boolean }) {
+function UserMessage(props: { message: MessageEntity; arriving?: boolean; editing?: MessageEditing }) {
   return (
     <If when={props.message.decisions} else={
-      <MessageBubble text={props.message.text} imageCount={props.message.imageCount} arriving={props.arriving} />
+      <View class="group gap-1">
+        <MessageBubble text={props.message.text} imageCount={props.message.imageCount} arriving={props.arriving}
+          marked={props.editing?.target() === props.message.messageId} />
+        {/* A shell command (`!`) never started an agent run, so there is nothing to ask again. */}
+        <PromptActions messageId={props.message.messageId} text={props.message.text}
+          editing={props.message.origin === "user_bash" ? undefined : props.editing} />
+      </View>
     }>
       {(items) => <Each of={items()} key={(item) => item.id}>
         {(item) => <MessageBubble context={item().question} text={item().answer ?? t("turn.skippedQuestion")} arriving={false} />}
@@ -143,10 +152,12 @@ export function TurnRow(props: {
     return props.turn.durationMs === undefined ? t("turn.work") : t("turn.workedFor", { duration: formatDuration(props.turn.durationMs) });
   };
   return (
-    <View class="w-full max-w-[760px] gap-3 self-center px-6 py-3">
+    // While an earlier message is edited, what the edit replaces fades: later turns whole, the edited turn's reply.
+    <View class={`w-full max-w-[760px] gap-3 self-center px-6 py-3 ${motionClass.fade} ${props.source.editing?.dropped(props.turn.key) ? "opacity-40" : ""}`}>
       <If when={props.turn.userMessageId === undefined ? undefined : props.source.message(props.turn.userMessageId)}>
-        {(message) => <UserMessage message={message()} arriving={props.turn.running} />}
+        {(message) => <UserMessage message={message()} arriving={props.turn.running} editing={props.source.editing} />}
       </If>
+      <View class={`gap-3 ${motionClass.fade} ${props.turn.userMessageId !== undefined && props.source.editing?.target() === props.turn.userMessageId ? "opacity-40" : ""}`}>
       <Each of={props.turn.sections} key={(section) => section.key}>
         {(section) => {
           const item = section();
@@ -154,7 +165,8 @@ export function TurnRow(props: {
             <If when={props.source.message(item.messageId)}>{(message) => <UserMessage message={message()} />}</If>
           );
           if (item.type === "answer") return (
-            <AssistantMessage message={props.source.message(item.messageId)} running={props.turn.running} showActions={!props.turn.running} />
+            <AssistantMessage message={props.source.message(item.messageId)} running={props.turn.running} showActions={!props.turn.running}
+              editing={props.source.editing} />
           );
           // A work section retains its key as more steps arrive, so read its steps through the row accessor.
           const steps = () => {
@@ -176,6 +188,7 @@ export function TurnRow(props: {
         <TurnChanges turn={props.turn} selectedPath={props.selectedPath} open={props.source.isOpen(changesKey())}
           onToggle={() => props.source.toggle(changesKey())} onViewChange={props.onViewChange} />
       </If>
+      </View>
     </View>
   );
 }

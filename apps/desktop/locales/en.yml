@@ -1,3 +1,6 @@
+auth:
+  required: "Sign in to %{name} to continue"
+  signIn: Sign in
 common:
   close: Close
   dismiss: Dismiss
@@ -12,6 +15,40 @@ settings:
   language: Language
   iconTheme: Icon theme
   iconThemeHelp: The set of icons associated with files and folders.
+  openIn: Open workspaces in
+  openInHelp: The default for "Open in" in a session's details.
+  pages:
+    general: General
+    appearance: Appearance
+    providers: Providers
+    remote: Remote control
+    about: About
+  providers:
+    help: Sign-in methods of model providers on this computer.
+    localOnly: Credentials of a paired computer are managed on that computer.
+    unavailable: Start the local backend to see its providers.
+    none: This computer's backend offers no sign-in methods.
+    failed: "Couldn't read sign-in status: %{detail}"
+    waiting: Waiting for sign-in…
+    copyCode: Copy device code
+    openBrowser: Open in browser
+    openFailed: "Couldn't open %{url} (%{detail}); copy it into a browser."
+    copyUrl: Copy address
+    noBrowser: no app opens it
+    signInFailed: "Couldn't sign in to %{name}: %{detail}"
+    status:
+      signedIn: Signed in
+      signInRequired: Not signed in
+      unknown: Unknown
+  about:
+    version: "Version %{version}"
+    nsh: "NSH %{version}"
+    configFile: Configuration file
+    dataDir: Data directory
+    logFile: Log file
+    notAvailable: Not available
+    reveal: Show in file manager
+    revealFailed: "Couldn't open the folder: %{detail}"
 iconTheme:
   dynamic: Dynamic
   minimal: Minimal (Monochrome)
@@ -41,6 +78,18 @@ notice:
   reopenToRetry: Select the session again to reload its history.
   newSessionFailed: Could not start the session
   promptFailed: The message was not sent
+  runFailed: The agent stopped with an error
+  signInAgain: Sign in again to continue
+  editFailed: Couldn't edit the message
+  forkFailed: Couldn't fork the session
+edit:
+  edit: Edit and ask again
+  fork: Fork into a new session
+  busy: Unavailable while the agent is working
+  banner: Editing an earlier message
+  bannerImages: "Editing an earlier message; its %{count} image(s) won't be sent again"
+  cancel: Cancel
+  notFound: This message is not in the session's history
 shell:
   newSession: New session
   workspaces: Workspaces
@@ -286,3 +335,136 @@ toolDetail:
     completed: Completed
     failed: Failed
     cancelled: Cancelled
+trajectory:
+  spacing: Time spacing
+  runTokens: "%{tokens} tok"
+  requestShort: "#%{n} · %{model}"
+  view: View
+  conversation: Conversation
+  trajectory: Trajectory
+  toggle: Switch between conversation and trajectory
+  columns:
+    type: Type
+    content: Content
+    input: Input
+    output: Output
+    thinking: Thinking
+    duration: Duration
+  types:
+    user: User
+    command: Command
+    request: Request
+    system: System
+    assistant: Assistant
+    tool: Tool
+    compaction: Compaction
+    branch_summary: Branch summary
+    setting: Setting
+    extension: Extension
+  run: "Run %{n}"
+  betweenRuns: Between runs
+  request: "Request #%{n} · %{model}"
+  firstToken: "first token %{duration}"
+  changed: changed
+  initialPrompt: Initial system prompt
+  promptChanged: System prompt changed
+  toolsAdded: "+%{n} tools"
+  toolsRemoved: "−%{n} tools"
+  toolsOnly: (tool calls only)
+  toolCalls: "%{count} tool calls"
+  failedCount: "%{count} failed"
+  steering: steering
+  follow_up: queued
+  skill: skill
+  images: "%{count} images"
+  files: "%{count} files"
+  cancelled: cancelled
+  failed: failed
+  setting:
+    model: "Model → %{detail}"
+    thinking_level: "Thinking → %{detail}"
+    active_tools: "Tools → %{detail}"
+  compactedFrom: "compacted from %{tokens} tok"
+  summary: "%{runs} runs · %{requests} requests · %{tokens} tok"
+  cacheHit: "cache hit %{rate}%"
+  evenSpacing: Even spacing
+  realTime: Real time
+  foldRuns: Fold runs
+  groupCalls: Group tool calls
+  showTimeline: Timeline
+  loadAll: Load all
+  loadEarlier: Load earlier records
+  earlierNotLoaded: Earlier records not loaded
+  range: "Range %{from}–%{to}"
+  clearRange: Clear range
+  overview: Timeline overview
+  empty: No records yet. After you send a message, each step of the agent shows here.
+  unavailable: The host keeps no session history, so the trajectory can't be shown.
+  failedToLoad: Couldn't load the trajectory
+  refreshFailed: Couldn't load new records
+  retry: Retry
+  inProgress: "In progress · %{duration}"
+  jumpToLatest: Jump to latest
+  records: Trajectory records
+  legend:
+    request: "Requests (lighter: waiting for the first token)"
+    tool: Tool calls
+    event: Events
+    failed: Failed
+  hover:
+    started: "Started %{at}"
+    took: "Took %{duration}"
+    firstToken: "First token after %{duration}"
+    generation: "Generation %{duration}"
+    throughput: "%{rate} tok/s"
+    merged: "%{count} records"
+record:
+  tab: Record
+  none: Select a record in the trajectory
+  previous: Previous record
+  next: Next record
+  status:
+    done: Completed
+    failed: Failed
+    cancelled: Cancelled
+    running: Running
+    noResult: No result
+  tabs:
+    overview: Overview
+    timing: Timing
+    usage: Usage
+    prompt: System prompt
+    tools: Tools
+    options: Options
+    arguments: Arguments
+    result: Result
+    raw: Raw
+  sections: Record sections
+  thinking: Thinking
+  calls: Tool calls
+  noText: No text
+  sent: Sent
+  firstToken: First token
+  lastToken: Last token
+  waited: Time to first token
+  generated: Generation
+  throughput: Throughput
+  attempt: "Attempt of request #%{n}"
+  tokenFlow: "%{input} in → %{output} out tok"
+  thisRequest: This request
+  sessionTotal: Session total
+  input: Input
+  cached: Cache read
+  output: Output
+  reasoning: Reasoning
+  full: Full
+  diff: Changes
+  promptView: System prompt view
+  loading: Loading…
+  missing: The host no longer has this content.
+  added: Added
+  removed: Removed
+  noResult: No result yet
+  started: Started
+  ended: Ended
+  duration: Duration

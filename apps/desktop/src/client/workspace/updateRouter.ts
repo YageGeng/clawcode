@@ -28,8 +28,8 @@ export class SessionUpdateRouter {
   private readonly store: WorkspaceStoreAccess;
   private readonly refreshes: RouterRefreshes;
   private readonly recovery: SessionRecoveryBuffer;
-  // A replacement history stays private until resume succeeds. Live state still goes to the workspace.
-  private readonly replays = new Map<SessionId, { history: SessionWorkspaceStager; valid: boolean }>();
+  // A replacement history stays private until resume succeeds. The wire may become live before publication.
+  private readonly replays = new Map<SessionId, { history: SessionWorkspaceStager; valid: boolean; wireComplete: boolean }>();
   private readonly branches = new Map<SessionId, { version: number; awaitingReplay: boolean }>();
   private receivedOrder = 0;
 
@@ -67,7 +67,10 @@ export class SessionUpdateRouter {
             stager = new SessionWorkspaceStager(sessionWorkspace(current, item.sessionId));
             stagers.set(item.sessionId, stager);
           }
-          const history = this.replays.get(item.sessionId)?.history ?? stager;
+          const replay = this.replays.get(item.sessionId);
+          // The server starts its live watcher after this marker, while question reservations may still delay publication.
+          if (replay && item.update.sessionUpdate === "replay_complete") replay.wireComplete = true;
+          const history = replay?.history ?? stager;
           const entities = history.snapshot();
           const publishedTools = history === stager ? undefined : current.sessionWorkspaces.get(item.sessionId)?.tools;
           const decoded = this.decoder.decode(item, entities, ++this.receivedOrder, publishedTools);
@@ -93,6 +96,12 @@ export class SessionUpdateRouter {
             }
           }
           if (decoded.refreshRuntime) refreshRuntime.add(batch.sessionId);
+          // Keep historical and superseded branches quiet, but surface live failures before the history is published.
+          // Older peers without replay_complete retain callback-based suppression until their replay finishes.
+          if (decoded.scope === "session" && decoded.notice !== undefined && (!replay || replay.wireComplete)
+            && !this.branches.get(item.sessionId)?.awaitingReplay) {
+            workspaceDraft = reduceWorkspace(workspaceDraft, { type: "notice/added", notice: decoded.notice });
+          }
         }
         // Stage the cursor synchronously so the next projection group in this
         // physical frame validates against it. No observer can run before dispatch.
@@ -147,7 +156,7 @@ export class SessionUpdateRouter {
   async replay(sessionId: SessionId, resume: (history: SessionWorkspaceStager) => Promise<void>): Promise<void> {
     this.recovery.requireFullReplay(sessionId);
     const branch = this.branches.get(sessionId);
-    const replay = { history: new SessionWorkspaceStager(initialSessionWorkspaceState), valid: true };
+    const replay = { history: new SessionWorkspaceStager(initialSessionWorkspaceState), valid: true, wireComplete: false };
     this.replays.set(sessionId, replay);
     if (branch) branch.awaitingReplay = false;
     try {

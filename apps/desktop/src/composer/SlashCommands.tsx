@@ -9,6 +9,7 @@ import type { HostStore } from "../stores/host";
 import { Textarea } from "../ui/input";
 import { ListItem } from "../ui/list";
 import { type } from "../ui/tokens";
+import { mainWindowFocused } from "../ui/windowFocus";
 
 /** The composer field and its Session's slash suggestions. A choice completes the draft without submitting it. */
 export function SlashCommands(props: {
@@ -21,6 +22,8 @@ export function SlashCommands(props: {
   onChange: (text: string) => void;
   onSubmit: () => void;
   onEscape?: () => void;
+  /** Receives the underlying multiline text input handle so callers can move focus when starting an edit. */
+  inputRef?: (node: InputRef) => void;
 }) {
   const query = computed(() => commandQuery(props.value));
   const matches = computed(() => {
@@ -69,8 +72,9 @@ export function SlashCommands(props: {
     list?.scrollToIndex({ index: next, animated: false, viewPosition: 0.5 });
   };
   // The textarea owns Enter, including IME confirmation and Shift+Enter. Bind only the palette's other keys.
+  // The field stays focused while another window (Settings) has the keys, and app-root bindings reach every window.
   effect(() => {
-    if (!focused()) return;
+    if (!focused() || !mainWindowFocused()) return;
     if (!showing()) {
       const onEscape = props.onEscape;
       return onEscape && keymap.bind("escape", onEscape, { when: "always" });
@@ -100,7 +104,7 @@ export function SlashCommands(props: {
           </List>
         </If>
       </If>
-      <Textarea variant="bare" value={props.value} inputRef={(node) => { input = node; }}
+      <Textarea variant="bare" value={props.value} inputRef={(node) => { input = node; props.inputRef?.(node); }}
         placeholder={t("composer.placeholder")} accessibilityLabel={t("composer.label")}
         onChange={(value) => { index.set(0); dismissed.set(false); props.onChange(value); }}
         onFocus={() => focused.set(true)} onBlur={() => focused.set(false)} onSubmit={submit} />

@@ -543,6 +543,7 @@ fn failed_agent_settlement_does_not_map_to_cancelled() {
             run_id: RunId::try_from("run-failed").expect("run id"),
             outcome: AgentOutcome::Failed {
                 message: "provider unavailable".to_string(),
+                sign_in: None,
             },
             usage: ModelUsage::default(),
         },
@@ -845,12 +846,29 @@ fn failed_run_maps_to_error_stop_reason() {
         run_id: RunId::try_from("run-failed").expect("run id"),
         outcome: AgentOutcome::Failed {
             message: "provider failed".to_string(),
+            sign_in: None,
         },
         usage: ModelUsage::default(),
     });
     assert_eq!(json["stopReason"], "error");
     assert_eq!(json["error"]["code"], -32603);
     assert_eq!(json["error"]["message"], "provider failed");
+}
+
+/// A run whose provider rejected its credential names the sign-in that fixes it.
+#[test]
+fn failed_run_needing_sign_in_carries_the_method() {
+    let json = idle_json(AgentEventPayload::AgentSettled {
+        run_id: RunId::try_from("run-failed").expect("run id"),
+        outcome: AgentOutcome::Failed {
+            message: "provider answered 401".to_string(),
+            sign_in: Some("chatgpt".to_string()),
+        },
+        usage: ModelUsage::default(),
+    });
+    assert_eq!(json["stopReason"], "error");
+    assert_eq!(json["error"]["code"], -32000);
+    assert_eq!(json["error"]["data"]["methodId"], "chatgpt");
 }
 
 /// A failed Slash Command reports its summary, or a fixed default when it has none.
@@ -1314,6 +1332,7 @@ fn finished_without_result(outcome: AgentOutcome) -> Vec<serde_json::Value> {
 fn user_bash_failure_without_result_emits_terminal_and_tool_end() {
     let updates = finished_without_result(AgentOutcome::Failed {
         message: "spawn failed".to_string(),
+        sign_in: None,
     });
     let terminal = updates
         .iter()
